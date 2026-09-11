@@ -29,7 +29,7 @@ const kubernetesCluster = {
   id: 901,
   type: "cluster",
   name: "k8s-prod",
-  props: { source: "kubernetes" },
+  props: { source: "kubernetes", k8s_cluster_id: 48, status: "degraded" },
   created_at: "2026-07-31T00:00:00Z",
   updated_at: "2026-07-31T01:00:00Z",
 };
@@ -98,7 +98,7 @@ describe("device cluster pages", () => {
     installBaseHandlers();
   });
 
-  it("lists non-Kubernetes clusters with member and enrollment health", async () => {
+  it("lists both enrollment methods with member and enrollment health", async () => {
     render(
       <MemoryRouter>
         <ClustersPage />
@@ -109,13 +109,42 @@ describe("device cluster pages", () => {
       name: "bare-metal-prod",
     });
     expect(clusterLink).toHaveAttribute("href", "/clusters/501");
-    expect(screen.queryByText("k8s-prod")).not.toBeInTheDocument();
-    expect(screen.getByText("1 / 1 个有效")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "k8s-prod" })).toHaveAttribute("href", "/clusters/901");
+    expect(screen.getByText("接入类型")).toBeInTheDocument();
+    expect(screen.getByText("Host")).toBeInTheDocument();
+    expect(screen.getByText("K8s")).toBeInTheDocument();
+    expect(screen.getByText("降级")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "删除集群 k8s-prod" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "应用性能" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "安装批次" })).not.toBeInTheDocument();
     expect(screen.getByText("最近活动")).toBeInTheDocument();
-    expect(screen.getByText("拓扑连接")).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "拓扑连接" })).not.toBeInTheDocument();
     expect(
-      screen.getByText("1 个集群 · 1 台设备 · 1 台在线"),
+      screen.getByText("2 个集群 · 1 台设备 · 1 台在线"),
     ).toBeInTheDocument();
+  });
+
+  it("opens Kubernetes lifecycle commands using the telemetry cluster ID without navigating", async () => {
+    const user = userEvent.setup();
+    const requested: string[] = [];
+    server.use(http.get('/api/v1/k8s/clusters/:id', ({ params }) => {
+      requested.push(String(params.id));
+      return HttpResponse.json({ id: 48, name: 'k8s-prod', status: 'offline', mode: 'full-node' });
+    }));
+    render(<MemoryRouter><ClustersPage /></MemoryRouter>);
+    await screen.findByRole('link', { name: 'k8s-prod' });
+    for (const [button, title] of [
+      ['查看集群 k8s-prod 的升级命令', '一键 Helm 升级'],
+      ['查看集群 k8s-prod 的卸载命令', 'Helm 卸载命令'],
+      ['删除集群 k8s-prod', '删除 Kubernetes 集群'],
+    ]) {
+      await user.click(screen.getByRole('button', { name: button }));
+      expect(await screen.findByRole('dialog')).toHaveTextContent(title);
+      await user.keyboard('{Escape}');
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    }
+    expect(requested).toEqual(['48', '48', '48']);
+    expect(screen.getByRole('link', { name: 'k8s-prod' })).toBeInTheDocument();
   });
 
   it("opens cluster detail when clicking anywhere on the row", async () => {

@@ -19,6 +19,7 @@ import {
   Settings,
   UsersRound,
   ChartLine,
+  Boxes,
   FileText,
   CalendarClock,
   Waypoints,
@@ -34,7 +35,6 @@ import {
   Trash2,
   Share2,
   Plug,
-  ShipWheel,
   Layers3,
   Network,
   PinOff,
@@ -288,13 +288,6 @@ export function Sidebar() {
           <Layers3 size={16} />
         </Link>
         <Link
-          to="/kubernetes"
-          aria-label={tr('Kubernetes', 'Kubernetes')}
-          className="rounded-lg p-2 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
-        >
-          <ShipWheel size={16} />
-        </Link>
-        <Link
           to="/skills"
           aria-label={tr('技能', 'Skills')}
           className="rounded-lg p-2 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
@@ -435,7 +428,6 @@ export function Sidebar() {
             { key: 'devices', to: '/devices', icon: HardDrive, label: tr('设备', 'Devices'), exactQuery: true },
             { key: 'clusters', to: '/clusters', icon: Layers3, label: tr('集群', 'Clusters') },
             { key: 'network-devices', to: '/devices?roles=network', icon: Network, label: tr('网络设备', 'Network devices') },
-            { key: 'kubernetes', to: '/kubernetes', icon: ShipWheel, iconSize: 16, label: 'Kubernetes' },
             { key: 'topology', to: '/topology', icon: Share2, label: tr('拓扑', 'Topology') },
           ]}
         />
@@ -446,6 +438,7 @@ export function Sidebar() {
           defaultOpen={false}
           items={[
             { key: 'monitor', to: '/monitor', icon: ChartLine, label: tr('监控', 'Monitor') },
+            { key: 'apm', to: '/apm', icon: Boxes, label: tr('服务', 'Services') },
             { key: 'logs', to: '/logs', icon: FileText, label: tr('日志', 'Logs') },
             { key: 'traces', to: '/traces', icon: Waypoints, label: tr('链路', 'Traces') },
             { key: 'alerts', to: '/alerts', icon: Siren, label: tr('告警', 'Alerts'), badge: incidentOpen },

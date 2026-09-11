@@ -36,6 +36,12 @@ export type KnowledgeRepo = {
   last_synced_at?: string | null;
   last_sync_error?: string;
   file_count: number;
+  commit_count?: number;
+  tag_count?: number;
+  branch_count?: number;
+  history_complete?: boolean;
+  source_synced_at?: string | null;
+  syncing?: boolean;
   // Server-set: marks the embedded platform vault (url == builtin://vault).
   // Use isBuiltinVault() rather than substring-matching the URL — the URL
   // scheme has changed before (ongridio/vault → builtin://vault) and silently
@@ -44,6 +50,10 @@ export type KnowledgeRepo = {
   created_at: string;
   updated_at: string;
 };
+
+export function repositoryName(url: string): string {
+  return url.split(/[?#]/)[0].replace(/\/+$/, '').split(/[/:]/).pop()?.replace(/\.git$/i, '') || url;
+}
 
 // isBuiltinVault is the single source of truth for "is this the built-in
 // platform vault row?". Prefers the server's is_builtin flag; falls back to
@@ -137,6 +147,10 @@ export function listRepos() {
 
 export function createRepo(input: { url: string; branch?: string; description?: string }) {
   return request<KnowledgeRepo>('POST', '/knowledge/repos', input);
+}
+
+export function updateRepo(id: number, input: { branch: string; description?: string }) {
+  return request<KnowledgeRepo>('PATCH', `/knowledge/repos/${id}`, input);
 }
 
 export function syncRepo(id: number) {

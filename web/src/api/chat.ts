@@ -49,6 +49,7 @@ export type ChatMessage = {
 };
 
 export type ChatSession = {
+ apm_source?: { trace_id: string; repo_id: string; source_directory: string; revision: string; commit_sha: string; error?: string };
   id: string;
   user_id: number;
   title: string;
@@ -89,6 +90,7 @@ export function listSessions(params?: { related_incident_id?: number }) {
 }
 
 export function createSession(input: {
+ apm_source?: { trace_id: string; service_name: string; service_namespace: string; environment: string; service_version: string; instance_id: string };
   title: string;
   scope?: string[];
   related_incident_id?: number;

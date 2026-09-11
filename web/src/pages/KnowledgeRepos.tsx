@@ -12,6 +12,7 @@ import {
   GitBranch,
   KeyRound,
   Plus,
+  Pencil,
   RefreshCw,
   Trash2,
 } from 'lucide-react';
@@ -27,7 +28,9 @@ import {
   isBuiltinVault,
   listRepos,
   listSSHIdentities,
+  repositoryName,
   syncRepo,
+  updateRepo,
   type KnowledgeRepo,
   type SSHIdentity,
 } from '@/api/knowledge';
@@ -98,8 +101,10 @@ export default function KnowledgeReposPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<KnowledgeRepo | null>(null);
   const [deleting, setDeleting] = useState<KnowledgeRepo | null>(null);
   const [syncingID, setSyncingID] = useState<number | null>(null);
+  const [credentialsRefresh, setCredentialsRefresh] = useState(0);
 
   const fetchAll = useCallback(async (silent = false) => {
     if (silent) setRefreshing(true);
@@ -124,6 +129,8 @@ export default function KnowledgeReposPage() {
 
   useEffect(() => {
     void fetchAll();
+    const timer = window.setInterval(() => { if (!document.hidden) void fetchAll(true); }, 5000);
+    return () => window.clearInterval(timer);
   }, [fetchAll]);
 
   const onSync = async (id: number) => {
@@ -152,15 +159,15 @@ export default function KnowledgeReposPage() {
             <h1 className="mt-1 text-base font-semibold text-zinc-100">{tr('代码仓库', 'Code repos')}</h1>
             <p className="mt-0.5 text-xs text-zinc-500">
               {tr(
-                '添加的 git 仓库 · sync 后 .md / .yaml / .json 文件会进知识库供 LLM 检索',
-                'Added git repos · after sync, .md / .yaml / .json files enter the knowledge base for LLM retrieval',
+                '新增后自动同步，每 5 分钟检查更新；拉取全部分支、Tag 和完整历史。',
+                'Syncs automatically after adding, then checks every 5 minutes for all branches, tags and full history.',
               )}
             </p>
           </div>
           <div className="flex gap-2">
             <Button variant="outline" size="sm"
               type="button"
-              onClick={() => fetchAll(true)}
+              onClick={() => { void fetchAll(true); setCredentialsRefresh((value) => value + 1); }}
               disabled={loading || refreshing}
               className="inline-flex items-center gap-1.5 px-2.5 py-1.5"
             >
@@ -185,7 +192,7 @@ export default function KnowledgeReposPage() {
           </div>
         )}
 
-        <SSHIdentitiesCard />
+        <SSHIdentitiesCard refreshKey={credentialsRefresh} />
 
         {loading ? (
           <div className="flex h-40 items-center justify-center text-sm text-zinc-500">{tr('加载中…', 'Loading…')}</div>
@@ -207,20 +214,23 @@ export default function KnowledgeReposPage() {
               <RepoCard
                 key={r.id}
                 repo={r}
-                syncing={syncingID === r.id}
+                syncing={syncingID === r.id || !!r.syncing}
                 onSync={() => void onSync(r.id)}
                 onDelete={() => setDeleting(r)}
+                onEdit={() => setEditing(r)}
               />
             ))}
           </div>
         )}
       </div>
 
-      {creating && (
+      {(creating || editing) && (
         <RepoCreator
-          onClose={() => setCreating(false)}
+          repo={editing ?? undefined}
+          onClose={() => { setCreating(false); setEditing(null); }}
           onCreated={() => {
             setCreating(false);
+            setEditing(null);
             void fetchAll(true);
           }}
         />
@@ -244,41 +254,30 @@ function RepoCard({
   syncing,
   onSync,
   onDelete,
+  onEdit,
 }: {
   repo: KnowledgeRepo;
   syncing: boolean;
   onSync: () => void;
   onDelete: () => void;
+  onEdit: () => void;
 }) {
   const { tr } = useI18n();
   return (
     <section className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0 w-full sm:flex-1">
-          <Hint content={repo.url}><div className="truncate font-mono text-sm text-zinc-100" >
-            {repo.url}
-          </div></Hint>
-          <div className="mt-0.5 text-[11px] text-zinc-500">
-            {tr('分支 ', 'Branch ')}<span className="font-mono text-zinc-300">{repo.branch}</span>
-            {repo.last_synced_at && (
-              <>
-                {' · '}
-                {tr(`上次同步 ${fullDateTime(repo.last_synced_at)}`, `Last sync ${fullDateTime(repo.last_synced_at)}`)}
-              </>
-            )}
-            {repo.file_count > 0 && (
-              <>
-                {' · '}
-                {tr(`文件 ${repo.file_count}`, `${repo.file_count} files`)}
-              </>
-            )}
-          </div>
+          <h2 className="break-words text-2xl font-semibold tracking-tight text-text">{repositoryName(repo.url)}</h2>
+          <Hint content={repo.url}><div className="mt-1 truncate font-mono text-xs text-zinc-500">{repo.url}</div></Hint>
           {repo.description && (
-            <p className="mt-2 break-words text-xs text-zinc-400">{repo.description}</p>
+            <p className="mt-2 break-words text-sm text-text-muted">{repo.description}</p>
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          <Hint content={tr('git pull + 重建索引', 'git pull + rebuild index')}><Button variant="outline" size="sm"
+          <Button variant="outline" size="sm" onClick={onEdit} disabled={syncing}>
+            <Pencil size={11} /> {tr('编辑', 'Edit')}
+          </Button>
+          <Hint content={tr('立即检查更新；文档未变化时跳过索引', 'Check now; skip indexing when documents are unchanged')}><Button variant="outline" size="sm"
             type="button"
             onClick={onSync}
             disabled={syncing}
@@ -298,6 +297,41 @@ function RepoCard({
           </Button></Hint>
         </div>
       </div>
+      <details className="mt-4 border-t border-border pt-3 text-xs text-text-muted">
+        <summary className="w-fit cursor-pointer select-none rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-500">{tr('同步详情', 'Sync details')}
+          <span className="ml-3 inline-flex items-center gap-1.5">
+            <span aria-hidden className={cn('h-1.5 w-1.5 rounded-full', repo.last_sync_error ? 'bg-red-500' : repo.source_synced_at && repo.history_complete ? 'bg-emerald-500' : 'bg-zinc-500')} />
+            {syncing ? tr('同步中', 'Syncing') : repo.last_sync_error ? tr('同步失败，将自动重试', 'Sync failed; will retry automatically') : repo.source_synced_at && repo.history_complete ? tr('完整历史已同步', 'Full history synced') : tr('等待完整同步', 'Awaiting full sync')}
+          </span>
+        </summary>
+        <div className="mt-3 space-y-2">
+          <div className="mt-0.5 text-[11px] text-zinc-500">
+            {tr('文档索引分支 ', 'Document indexing ref ')}<span className="font-mono text-zinc-300">{repo.branch}</span>
+            {repo.last_synced_at && (
+              <>
+                {' · '}
+                {tr(`上次同步 ${fullDateTime(repo.last_synced_at)}`, `Last sync ${fullDateTime(repo.last_synced_at)}`)}
+              </>
+            )}
+            {!repo.last_synced_at && <span className="ml-2 text-text-muted">{tr('等待重建索引', 'Awaiting reindex')}</span>}
+            {repo.last_synced_at && repo.file_count > 0 && (
+              <>
+                {' · '}
+                {tr(`文件 ${repo.file_count}`, `${repo.file_count} files`)}
+              </>
+            )}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-muted">
+            <span>Commit {repo.source_synced_at ? (repo.commit_count ?? 0).toLocaleString() : '—'}</span>
+            <span>Tag {repo.source_synced_at ? (repo.tag_count ?? 0).toLocaleString() : '—'}</span>
+            <span>{tr('分支', 'Branches')} {repo.source_synced_at ? (repo.branch_count ?? 0).toLocaleString() : '—'}</span>
+          </div>
+          {repo.source_synced_at && <p className="mt-1 text-xs text-text-faint">
+            {tr('源码最近拉取：', 'Source last fetched: ')}{fullDateTime(repo.source_synced_at)}
+            {' · '}{tr('数量为本地快照，不代表远端此刻没有新提交。', 'Counts reflect the local snapshot; newer remote commits may exist.')}
+          </p>}
+        </div>
+      </details>
       {repo.last_sync_error && (
         <div className="mt-2 rounded-md border border-red-500/30 bg-red-500/5 px-2 py-1.5 text-[11px] text-red-300">
           <div className="font-medium">
@@ -317,11 +351,11 @@ function RepoCard({
   );
 }
 
-function RepoCreator({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+function RepoCreator({ repo, onClose, onCreated }: { repo?: KnowledgeRepo; onClose: () => void; onCreated: () => void }) {
   const { tr } = useI18n();
-  const [url, setUrl] = useState('');
-  const [branch, setBranch] = useState('main');
-  const [description, setDescription] = useState('');
+  const [url, setUrl] = useState(repo?.url ?? '');
+  const [branch, setBranch] = useState(repo?.branch ?? 'main');
+  const [description, setDescription] = useState(repo?.description ?? '');
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -329,7 +363,9 @@ function RepoCreator({ onClose, onCreated }: { onClose: () => void; onCreated: (
     setSubmitting(true);
     setErr(null);
     try {
-      await createRepo({ url: url.trim(), branch: branch.trim() || 'main', description: description.trim() || undefined });
+      const input = { branch: branch.trim() || 'main', description: description.trim() };
+      if (repo) await updateRepo(repo.id, input);
+      else await createRepo({ url: url.trim(), ...input });
       onCreated();
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : (e as Error).message);
@@ -341,13 +377,14 @@ function RepoCreator({ onClose, onCreated }: { onClose: () => void; onCreated: (
   return (
     <Modal
       open
-      onClose={onClose}
-      title={tr('添加 git 仓库', 'Add git repo')}
+      onClose={() => { if (!submitting) onClose(); }}
+      title={repo ? tr('编辑仓库', 'Edit repository') : tr('添加 git 仓库', 'Add git repo')}
       footer={
         <>
           <Button variant="outline" size="sm"
             type="button"
             onClick={onClose}
+            disabled={submitting}
             className="px-3 py-1.5"
           >
             {tr('取消', 'Cancel')}
@@ -358,18 +395,22 @@ function RepoCreator({ onClose, onCreated }: { onClose: () => void; onCreated: (
             disabled={submitting || url.trim() === ''}
             className="px-3 py-1.5 font-medium text-accent-fg"
           >
-            {submitting ? tr('保存中…', 'Saving…') : tr('保存（保存后再点同步）', 'Save (then click Sync)')}
+            {submitting ? tr('验证并保存中…', 'Verifying and saving…') : tr('验证并保存', 'Verify and save')}
           </Button>
         </>
       }
     >
       <div className="space-y-3 text-xs text-zinc-300">
-        {err && <div className="rounded-md border border-red-500/40 bg-red-500/5 px-3 py-2 text-red-300">{err}</div>}
+        <p className="text-text-muted">{tr('保存前验证仓库访问权限与分支/Tag，成功后自动同步并更新文档索引。完整拉取结果可在仓库卡片查看。', 'Access and branch/tag are verified before saving. Sync and document indexing then run automatically; the card shows the full fetch result.')}</p>
+        {err && <div role="alert" className="whitespace-pre-wrap break-words rounded-md border border-red-500/40 bg-red-500/5 px-3 py-2 text-red-300">{gitErrorHint(err, url, tr) || tr('验证或保存失败，请检查仓库地址、凭证和分支/Tag。', 'Verification or saving failed. Check the repository URL, credentials and branch/tag.')}<div className="mt-1">{err}</div></div>}
         <Label className="block">
           <div className="mb-1 text-[11px] text-zinc-500">{tr('仓库 URL *', 'Repo URL *')}</div>
           <Input
             type="text"
+            aria-label={tr('仓库 URL *', 'Repo URL *')}
             value={url}
+            disabled={!!repo || submitting}
+            maxLength={512}
             onChange={(e) => setUrl(e.target.value)}
             placeholder="https://github.com/your-org/runbooks.git  /  git@gitlab.company.internal:team/repo.git"
             className="w-full font-mono"
@@ -382,10 +423,13 @@ function RepoCreator({ onClose, onCreated }: { onClose: () => void; onCreated: (
           </div>
         </Label>
         <Label className="block">
-          <div className="mb-1 text-[11px] text-zinc-500">{tr('分支', 'Branch')}</div>
+          <div className="mb-1 text-[11px] text-zinc-500">{tr('文档索引分支或 Tag', 'Document indexing branch or tag')}</div>
           <Input
             type="text"
+            aria-label={tr('文档索引分支或 Tag', 'Document indexing branch or tag')}
             value={branch}
+            disabled={submitting}
+            maxLength={128}
             onChange={(e) => setBranch(e.target.value)}
             placeholder="main"
             className="w-full font-mono"
@@ -395,7 +439,10 @@ function RepoCreator({ onClose, onCreated }: { onClose: () => void; onCreated: (
           <div className="mb-1 text-[11px] text-zinc-500">{tr('说明（可选）', 'Description (optional)')}</div>
           <Input
             type="text"
+            aria-label={tr('说明（可选）', 'Description (optional)')}
             value={description}
+            disabled={submitting}
+            maxLength={512}
             onChange={(e) => setDescription(e.target.value)}
             placeholder={tr('一句话说这个仓库装什么', "One-liner describing what this repo holds")}
             className="w-full"
@@ -468,12 +515,12 @@ function DeleteRepoDialog({ repo, onClose, onDone }: { repo: KnowledgeRepo; onCl
 // SSHIdentitiesCard — phase 1. Manages stored SSH private
 // keys + the hosts they auth against. Lives in this page so all git
 // auth config (HTTPS PAT card above + SSH keys here) is one stop.
-function SSHIdentitiesCard() {
+function SSHIdentitiesCard({ refreshKey }: { refreshKey: number }) {
   const { confirmAction, dialog } = useDialogs();
   const { tr } = useI18n();
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<SSHIdentity[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
 
@@ -491,8 +538,8 @@ function SSHIdentitiesCard() {
   }, []);
 
   useEffect(() => {
-    if (open) void refresh();
-  }, [open, refresh]);
+    void refresh();
+  }, [refresh, refreshKey]);
 
   const onDelete = async (id: number) => {
     if (!(await confirmAction(tr('删除该 SSH 凭证？后续指向其 hosts 的仓库会同步失败。', 'Delete this SSH identity? Subsequent syncs to its hosts will fail.')))) return;
@@ -508,14 +555,15 @@ function SSHIdentitiesCard() {
     <>{dialog}<section className="mb-4 rounded-xl border border-zinc-800 bg-zinc-900/40">
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => { setOpen((v) => !v); if (!open && err) void refresh(); }}
+        aria-expanded={open}
         className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
       >
         <div className="flex items-center gap-2 text-sm text-zinc-200">
           <KeyRound size={14} className="text-zinc-400" />
           {tr('凭证 · SSH key', 'Credentials · SSH key')}
           <span className="text-[11px] text-zinc-500">
-            {items.length > 0
+            {loading ? tr('加载中…', 'Loading…') : err ? tr('查询失败', 'Query failed') : items.length > 0
               ? tr(`已配置 ${items.length} 条`, `${items.length} configured`)
               : tr('未配置', 'None')}
           </span>
@@ -527,7 +575,7 @@ function SSHIdentitiesCard() {
           {err && <div className="rounded-md border border-red-500/40 bg-red-500/5 px-3 py-2 text-[11px] text-red-300">{err}</div>}
           {loading ? (
             <div className="text-[11px] text-zinc-500">{tr('加载中…', 'Loading…')}</div>
-          ) : items.length === 0 ? (
+          ) : err ? null : items.length === 0 ? (
             <div className="text-[11px] text-zinc-500">
               {tr(
                 '还没有 SSH 凭证。添加 SSH 风格的仓库（git@host:owner/repo）之前需要先在这里配置一条。',

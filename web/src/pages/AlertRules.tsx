@@ -5,7 +5,7 @@ import { Hint } from '@/components/ui/Tooltip';
 import { Select } from '@/components/ui/Select';
 import { Checkbox } from '@/components/ui/Checkbox';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   ChevronLeft,
   ChevronDown,
@@ -190,6 +190,8 @@ export default function AlertRulesPage() {
   const { alertAction, dialog } = useDialogs();
   const { tr } = useI18n();
   const { isAdmin } = usePermissions();
+  const location = useLocation();
+  const navigate = useNavigate();
   // alert rules are platform config — only admin mutates.
   // user / viewer can still read the list; write buttons get a
   // disabled + tooltip treatment + reject at the backend (403).
@@ -206,6 +208,12 @@ export default function AlertRulesPage() {
     rule?: Rule;
     seed?: Partial<RuleInput>;
   } | null>(null);
+  useEffect(() => {
+    const draft = location.state?.apmDraft as Partial<RuleInput> | undefined;
+    if (!isAdmin || draft?.kind !== 'metric_raw' || typeof draft.spec?.expr !== 'string') return;
+    setEditing({ mode: 'create', seed: draft });
+    navigate(location.pathname, { replace: true, state: null });
+  }, [location, navigate, isAdmin]);
   const [confirmDelete, setConfirmDelete] = useState<Rule | null>(null);
   const [showPresets, setShowPresets] = useState(false);
   // Runtime cadence (evaluator + cooldown) — global, per-deployment.

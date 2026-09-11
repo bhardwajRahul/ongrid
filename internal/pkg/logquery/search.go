@@ -324,6 +324,9 @@ func (r *SearchRequest) NormalizeAndValidate() error {
 		if len(f.Values) > MaxKeywordCount {
 			return fmt.Errorf("logquery: filter %q has too many values", f.Field)
 		}
+		if f.Operator == FilterEqual && (f.Field == "environment" || f.Field == "service_namespace") && len(f.Values) == 1 && f.Values[0] == "" {
+			continue // Unset APM identity includes empty and missing attributes.
+		}
 		if err := validateStrings("filter value", f.Values, MaxKeywordLength); err != nil {
 			return err
 		}
@@ -383,6 +386,14 @@ func LookupField(name string) (FieldDefinition, bool) {
 		return structuredField(name, "keyword", "node", "resource.attributes.node"), true
 	case "service_name":
 		return field(name, "keyword", "service_name", "resource.attributes.service.name"), true
+	case "service_namespace":
+		return structuredField(name, "keyword", "service_namespace", "resource.attributes.service.namespace"), true
+	case "service_version":
+		return structuredField(name, "keyword", "service_version", "resource.attributes.service.version"), true
+	case "instance_id":
+		return structuredField(name, "keyword", "service_instance_id", "resource.attributes.service.instance.id"), true
+	case "environment":
+		return structuredField(name, "keyword", "deployment_environment_name", "resource.attributes.deployment.environment.name"), true
 	case "source_id":
 		return field(name, "keyword", "ongrid_source", "resource.attributes.ongrid_source"), true
 	case "level":
@@ -409,7 +420,7 @@ func LookupField(name string) (FieldDefinition, bool) {
 func AllowedFields() []Field {
 	names := []string{
 		"device_id", "cluster_id", "namespace", "workload", "pod", "container", "node",
-		"service_name", "source_id", "level", "file", "unit", "trace_id", "span_id", "message",
+		"service_name", "service_namespace", "service_version", "instance_id", "environment", "source_id", "level", "file", "unit", "trace_id", "span_id", "message",
 	}
 	out := make([]Field, 0, len(names))
 	for _, name := range names {

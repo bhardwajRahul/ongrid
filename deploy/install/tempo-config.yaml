@@ -46,8 +46,21 @@ metrics_generator:
         - service.name
         - span.kind
         - status.code
+        - service.namespace
+        - deployment.environment.name
+        - telemetry.sdk.language
+        - service.instance.id
+        - service.version
+        - device_id
+        - cluster_id
+        - http.request.method
+        - http.method
     service_graphs:
       max_items: 10000
+      enable_client_server_prefix: true
+      dimensions:
+        - service.namespace
+        - deployment.environment.name
 
 storage:
   trace:

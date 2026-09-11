@@ -1,14 +1,14 @@
+import { TimeRangePicker } from '@/components/ui/TimeRangePicker';
 import { FilterField } from '@/components/ui/FilterField';
 import { Label, Input } from '@/components/ui';
 import { Hint } from '@/components/ui/Tooltip';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   AlertTriangle,
   ChevronRight,
   ArrowLeft,
   Braces,
-  Clock,
   Copy,
   Filter,
   Loader2,
@@ -24,6 +24,7 @@ import {
   type TempoTraceSummary,
   type TraceGetResponse,
 } from '@/api/traces';
+import { absoluteWindow, canonicalTraceID } from '@/lib/telemetryContext';
 import { ApiError } from '@/api/client';
 import { openObservabilityUrl, buildExploreUrl } from '@/lib/drilldown';
 import { GrafanaLinkButton } from '@/components/GrafanaLinkButton';
@@ -33,6 +34,7 @@ import {
   formatTraceSummaryDuration,
   traceSearchQuery,
   traceSummaryDurationMs,
+  traceSummaryStartMs,
   type TraceScope,
   type TraceQuickFilter,
 } from '@/components/traces/traceSummary';
@@ -120,16 +122,7 @@ type TraceRow = {
 function normalizeRow(t: TempoTraceSummary): TraceRow {
   // Tempo omits durationMs below 1ms, while spanSet keeps durationNanos.
   const durationMs = traceSummaryDurationMs(t);
-  // Tempo 2.x: startTimeUnixNano (string of nanos); some clients emit
-  // startTime (RFC3339). Convert both to ms.
-  let startMs = 0;
-  if (t.startTimeUnixNano) {
-    const n = Number(t.startTimeUnixNano);
-    if (Number.isFinite(n)) startMs = n / 1_000_000;
-  } else if (t.startTime) {
-    const d = Date.parse(t.startTime);
-    if (Number.isFinite(d)) startMs = d;
-  }
+  const startMs = traceSummaryStartMs(t);
   return {
     traceId: t.traceID,
     service: t.rootServiceName ?? '',
@@ -143,21 +136,26 @@ function normalizeRow(t: TempoTraceSummary): TraceRow {
 export default function TracesPage() {
   const { tr } = useI18n();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const absolute = absoluteWindow(searchParams);
+  const initialQuery = searchParams.get('q') || DEFAULT_TRACEQL;
+  const absoluteStart = absolute?.start;
+  const absoluteEnd = absolute?.end;
   const { traceId: routeTraceId = '' } = useParams<{ traceId?: string }>();
-  const [range, setRange] = useState(DEFAULT_RANGE);
+  const [range, setRange] = useState(absolute ? 'custom' : DEFAULT_RANGE);
   const [serviceFilter, setServiceFilter] = useState('');
   const [operationFilter, setOperationFilter] = useState('');
   const [peerFilter, setPeerFilter] = useState('');
   const [scope, setScope] = useState<TraceScope>('business');
-  const [traceQL, setTraceQL] = useState(DEFAULT_TRACEQL);
+  const [traceQL, setTraceQL] = useState(initialQuery);
   const [quickFilter, setQuickFilter] = useState<TraceQuickFilter>('');
   const [submitted, setSubmitted] = useState({
-    range: DEFAULT_RANGE,
+    range: absolute ? 'custom' : DEFAULT_RANGE,
     service: '',
     operation: '',
     peer: '',
     scope: 'business' as TraceScope,
-    traceQL: DEFAULT_TRACEQL,
+    traceQL: initialQuery,
     quickFilter,
   });
   // Auto-query on page load with the default filters (range=1h, no
@@ -181,6 +179,7 @@ export default function TracesPage() {
   const [selectedTrace, setSelectedTrace] = useState<TraceGetResponse | null>(null);
   const [selectedTraceLoading, setSelectedTraceLoading] = useState(false);
   const [selectedTraceErr, setSelectedTraceErr] = useState<string | null>(null);
+  const lastWindow = useRef<{ start: string; end: string } | null>(null);
   const requestSeq = useRef(0);
   const detailRequestSeq = useRef(0);
 
@@ -195,8 +194,8 @@ export default function TracesPage() {
   const closeTrace = useCallback(() => {
     resetTrace();
     setTraceIdInput('');
-    navigate('/traces', { replace: true });
-  }, [navigate, resetTrace]);
+    navigate(`/traces?${searchParams}`, { replace: true });
+  }, [navigate, resetTrace, searchParams]);
 
   const loadTrace = useCallback(async (row: TraceRow) => {
     const seq = ++detailRequestSeq.current;
@@ -217,8 +216,15 @@ export default function TracesPage() {
   }, []);
 
   const openTrace = useCallback((row: TraceRow) => {
-    navigate(`/traces/${encodeURIComponent(row.traceId)}`);
-  }, [navigate]);
+    const next = new URLSearchParams(searchParams);
+    const query = traceSearchQuery(submitted.traceQL, submitted.service, submitted.operation, submitted.peer, submitted.scope);
+    next.set('q', query);
+    if (lastWindow.current) { next.set('start', lastWindow.current.start); next.set('end', lastWindow.current.end); }
+    if (searchParams.get('q') && query !== traceSearchQuery(searchParams.get('q')!, '', '', '', 'all')) {
+      for (const key of ['service_name', 'service_namespace', 'environment', 'operation']) next.delete(key);
+    }
+    navigate(`/traces/${encodeURIComponent(row.traceId)}?${next}`);
+  }, [navigate, searchParams, submitted]);
 
   useEffect(() => {
     const id = routeTraceId.trim();
@@ -252,8 +258,8 @@ export default function TracesPage() {
     try {
       const now = new Date();
       const startMs = now.getTime() - rangeToMs(submitted.range);
-      const start = new Date(startMs).toISOString();
-      const end = now.toISOString();
+      const start = submitted.range === 'custom' && absoluteStart ? absoluteStart : new Date(startMs).toISOString();
+      const end = submitted.range === 'custom' && absoluteEnd ? absoluteEnd : now.toISOString();
       const resp = await searchTraces({
         q: traceSearchQuery(submitted.traceQL, submitted.service, submitted.operation, submitted.peer, submitted.scope, submitted.quickFilter),
         start,
@@ -261,6 +267,7 @@ export default function TracesPage() {
         limit: PAGE_LIMIT,
       });
       if (seq !== requestSeq.current) return;
+      lastWindow.current = { start, end };
       const incoming = (resp.traces ?? []).map(normalizeRow);
       // Newest first by start time — Tempo usually returns this order
       // already but be defensive.
@@ -273,7 +280,7 @@ export default function TracesPage() {
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
-  }, [submitted.range, submitted.service, submitted.operation, submitted.peer, submitted.scope, submitted.traceQL, submitted.quickFilter]);
+  }, [submitted.range, submitted.service, submitted.operation, submitted.peer, submitted.scope, submitted.traceQL, submitted.quickFilter, absoluteStart, absoluteEnd]);
 
   useEffect(() => {
     if (!hasSearched) return;
@@ -381,18 +388,18 @@ export default function TracesPage() {
       (grafanaBaseUrl || '').replace(/\/+$/, '') || `${window.location.origin}/grafana`;
     const expr = traceSearchQuery(traceQL, serviceFilter, operationFilter, peerFilter, scope, quickFilter);
     const now = Date.now();
-    const from = now - rangeToMs(range);
+    const from = range === 'custom' && absoluteStart ? Date.parse(absoluteStart) : now - rangeToMs(range);
     const url = buildExploreUrl({
       base,
       dsType: 'tempo',
       dsUid: 'ongrid-tempo',
       query: { query: expr, queryType: 'traceql' },
       fromMs: from,
-      toMs: now,
+      toMs: range === 'custom' && absoluteEnd ? Date.parse(absoluteEnd) : now,
       orgId: grafanaOrgId,
     });
     void openObservabilityUrl(url);
-  }, [grafanaBaseUrl, grafanaOrgId, range, serviceFilter, operationFilter, peerFilter, scope, traceQL, quickFilter]);
+  }, [grafanaBaseUrl, grafanaOrgId, range, serviceFilter, operationFilter, peerFilter, scope, traceQL, quickFilter, absoluteStart, absoluteEnd]);
 
   return (
     <main className="anim-fade flex flex-1 flex-col overflow-hidden">
@@ -468,16 +475,27 @@ export default function TracesPage() {
                   ]}
                 />
               </FilterField>
-              <FilterField label={<><Clock size={10} />{tr('时间范围', 'Time range')}</>} className="w-52 shrink-0">
-                <Select
-                  label={tr('时间范围', 'Time range')}
-                  value={range}
-                  onValueChange={setRange}
-                  options={[
-                    ...RANGE_PRESETS.map((option) => ({ value: option.value, label: tr(option.labelZh, option.labelEn) })),
-                  ]}
-                />
-              </FilterField>
+              <TimeRangePicker
+                value={{ range, start: range === 'custom' ? absoluteStart : undefined, end: range === 'custom' ? absoluteEnd : undefined }}
+                presets={RANGE_PRESETS.map((option) => ({ value: option.value, label: tr(option.labelZh, option.labelEn), durationMs: rangeToMs(option.value) }))}
+                onChange={(selection) => {
+                  if (selection.range === submitted.range && (selection.range === 'custom'
+                    ? selection.start === absoluteStart && selection.end === absoluteEnd
+                    : !absoluteStart && !absoluteEnd)) void fetchTraces();
+                  const next = new URLSearchParams(searchParams);
+                  if (selection.range === 'custom') {
+                    next.set('start', selection.start);
+                    next.set('end', selection.end);
+                  } else {
+                    next.delete('start');
+                    next.delete('end');
+                  }
+                  setRange(selection.range);
+                  setSubmitted((current) => ({ ...current, range: selection.range }));
+                  setLive(false);
+                  setSearchParams(next, { replace: true });
+                }}
+              />
               <FilterField label={<><SearchIcon size={10} />trace_id</>} className="min-w-64 flex-1">
                 <Input aria-label="trace_id" value={traceIdInput} onChange={(event) => setTraceIdInput(event.target.value)} placeholder={tr('粘贴 ID 直接打开', 'Paste an ID to open')} className={cn(INPUT_BASE, "font-mono")} />
               </FilterField>
@@ -578,6 +596,7 @@ export default function TracesPage() {
                 <Button onClick={() => void loadTrace(selectedRow)}>{tr('重试', 'Retry')}</Button>
               </div>
             )}
+            {selectedRow && <Link className="mb-3 inline-block text-xs underline" to={`/logs?${(() => { const p = new URLSearchParams(searchParams); p.set('trace_id', canonicalTraceID(selectedRow.traceId) || selectedRow.traceId); if (!absoluteWindow(p)) { const ts = selectedRow.startMs || Date.now(); p.set('start', new Date(ts - 300000).toISOString()); p.set('end', new Date(ts + Math.max(300000, selectedRow.durationMs)).toISOString()); } return p; })()}`}>{tr('查看同请求日志', 'View request logs')}</Link>}
             {selectedTrace && !selectedTraceLoading && !selectedTraceErr && (
               <TraceWaterfall
                 trace={selectedTrace}

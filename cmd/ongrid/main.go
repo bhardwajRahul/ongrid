@@ -81,6 +81,7 @@ import (
 	iamserver "github.com/ongridio/ongrid/internal/iam/server"
 	iamservice "github.com/ongridio/ongrid/internal/iam/service"
 
+	managerbizapm "github.com/ongridio/ongrid/internal/manager/biz/apm"
 	managerbizdevice "github.com/ongridio/ongrid/internal/manager/biz/device"
 	managerbizedge "github.com/ongridio/ongrid/internal/manager/biz/edge"
 	managerbizk8s "github.com/ongridio/ongrid/internal/manager/biz/k8s"
@@ -160,6 +161,7 @@ import (
 	managermodelmcp "github.com/ongridio/ongrid/internal/manager/model/mcp"
 	managerserveraiops "github.com/ongridio/ongrid/internal/manager/server/aiops"
 	managerserveralert "github.com/ongridio/ongrid/internal/manager/server/alert"
+	managerserverapm "github.com/ongridio/ongrid/internal/manager/server/apm"
 	managerserverapproval "github.com/ongridio/ongrid/internal/manager/server/approval"
 	managerserveraudit "github.com/ongridio/ongrid/internal/manager/server/audit"
 	managerserverdevice "github.com/ongridio/ongrid/internal/manager/server/device"
@@ -249,10 +251,12 @@ func main() {
 		}
 	}
 	otelShutdown, err := tracing.Init(rootCtx, tracing.Config{
-		ServiceName:   "ongrid-manager",
-		Endpoint:      otelEndpoint,
-		Insecure:      true,
-		SamplingRatio: otelSamplingRatio,
+		ServiceName:      "ongrid-manager",
+		ServiceNamespace: "ongrid",
+		Environment:      "internal",
+		Endpoint:         otelEndpoint,
+		Insecure:         true,
+		SamplingRatio:    otelSamplingRatio,
 	})
 	if err != nil {
 		log.Warn("tracing: init failed (continuing without OTel)", slog.Any("err", err))
@@ -922,7 +926,7 @@ func main() {
 	topologyNodeTypeRepo := managertopologydata.NewNodeTypeRepo(db)
 	topologyUC := managerbiztopology.NewUsecase(
 		topologyNodeRepo, topologyRelationRepo, topologyRelationTypeRepo, topologyNodeTypeRepo, log,
-	)
+	).WithClusterDevices(deviceRepo).WithServiceDevices(deviceRepo)
 	topologyUC.AddClusterDeleteGuard(managerbizedge.NewUpgradeJobClusterDeleteGuard(edgeRepo))
 	topologyHandler := managerservertopology.NewHandler(topologyUC)
 
@@ -1184,6 +1188,16 @@ func main() {
 		tracesHandler = managerservertraces.NewHandler(nil)
 	}
 	profilesHandler := managerserverprofiles.NewHandler(cfg.Profiles.URL)
+	var apmProm managerbizapm.PromQuerier
+	if promQueryClient != nil {
+		apmProm = promQueryClient
+	}
+	var apmTraces managerbizapm.TraceQuerier
+	if cfg.Traces.URL != "" {
+		apmTraces = pkgtracequery.New(cfg.Traces.URL, log.With(slog.String("comp", "apm-traces")))
+	}
+	apmService := managerbizapm.New(apmProm, apmTraces, logsBackendSvc).WithClusterScopes(topologyUC)
+	apmHandler := managerserverapm.NewHandler(apmService, log)
 
 	// Frontierbound service-end SDK: opens a long-lived service connection
 	// to the upstream frontier broker (a separate docker container) and
@@ -1456,6 +1470,7 @@ func main() {
 		log.Error("knowledge: migrate failed", slog.Any("err", err))
 	}
 	knowledgeRepo := managerknowledgedata.New(db)
+	apmService.WithRepositoryBindings(settingSvc, knowledgeRepo)
 	// Embedding provider — defaults to OpenAI-compatible API
 	// (works for OpenAI, GLM, Qwen, DeepSeek). Falls back to the
 	// existing OPENAI_API_KEY when ONGRID_EMBEDDING_API_KEY is empty
@@ -1510,7 +1525,9 @@ func main() {
 			log.Warn("knowledge: usecase build failed", slog.Any("err", kErr))
 		} else {
 			knowledgeUC = uc
+			go knowledgeUC.RunAutoSync(rootCtx)
 			toolsReg.SetKnowledgeSearcher(knowledgeUC)
+			apmService.WithSourceRevisions(knowledgeUC)
 			// GitHub-PAT-via-GIT_ASKPASS resolver wiring
 			// removed. SSH-style repos use ssh_identities; HTTPS auth
 			// returns in P3 via credential.helper.
@@ -1641,6 +1658,7 @@ func main() {
 
 	aiopsSvc := managersvcaiops.NewWithKernel(aiopsAgent, aiopsRuntime, kernel, aiopsRepo, aiopsUsage, log)
 	aiopsSvc.SetMutatingProposalRepo(mutatingProposalRepo)
+	aiopsSvc.WithAPMSourceResolver(apmService)
 	aiopsSvc.SetAttachmentRepo(aiopsRepo)
 	aiopsSvc.SetModelCatalog(llmRouter)
 	aiopsHandler := managerserveraiops.NewHandler(aiopsSvc)
@@ -2659,6 +2677,7 @@ func main() {
 			monitorHandler.Register(protected)
 			logsHandler.Register(protected)
 			tracesHandler.Register(protected)
+			apmHandler.Register(protected)
 			profilesHandler.Register(protected)
 			aiopsHandler.Register(protected)
 			alertHandler.Register(protected)
@@ -2743,6 +2762,9 @@ func main() {
 	eg.Go(func() error { return auditUC.RunRetention(egCtx, auditRetentionDays) })
 	eg.Go(func() error { return runK8sEventRetention(egCtx, k8sUC, log) })
 	eg.Go(func() error { return runK8sTopologyReconcile(egCtx, k8sUC, log) })
+	if apmProm != nil {
+		eg.Go(func() error { return runServiceTopologyReconcile(egCtx, apmService, topologyUC, log) })
+	}
 
 	// ADR-026: chatruntime worker session sampler — surfaces orphan
 	// worker accumulation as a gauge. The 161-orphan incident (v0.7.44)

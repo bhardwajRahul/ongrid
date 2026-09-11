@@ -1,6 +1,7 @@
 package logquery
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -118,5 +119,39 @@ func TestNormalizeGroupByKeepsPortableDimensionsOnly(t *testing.T) {
 				t.Fatalf("NormalizeGroupBy(%v) unexpectedly succeeded", tc.fields)
 			}
 		})
+	}
+}
+
+func TestAPMIdentityFiltersAcrossBackends(t *testing.T) {
+	req := validSearchRequest()
+	req.Filters = []FieldFilter{{Field: "service_version", Operator: FilterEqual, Values: []string{"v2"}}, {Field: "instance_id", Operator: FilterEqual, Values: []string{"orders-2"}}, {Field: "service_namespace", Operator: FilterEqual, Values: []string{"trade"}}, {Field: "environment", Operator: FilterEqual, Values: []string{""}}, {Field: "trace_id", Operator: FilterEqual, Values: []string{"abc123"}}}
+	if err := req.NormalizeAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	loki, err := compileLogQL(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`service_version="v2"`, `service_instance_id="orders-2"`, `service_namespace="trade"`, `deployment_environment_name=""`, `trace_id="abc123"`} {
+		if !strings.Contains(loki, want) {
+			t.Fatalf("missing %s: %s", want, loki)
+		}
+	}
+	es, err := buildElasticsearchQuery(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(es)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`resource.attributes.service.version`, `resource.attributes.service.instance.id`, `resource.attributes.service.namespace`, `resource.attributes.deployment.environment.name`, `minimum_should_match`, `must_not`, `trace_id`} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("missing %s: %s", want, body)
+		}
+	}
+	req.Filters = []FieldFilter{{Field: "trace_id", Operator: FilterEqual, Values: []string{""}}}
+	if err := req.NormalizeAndValidate(); err == nil {
+		t.Fatal("empty trace id accepted")
 	}
 }

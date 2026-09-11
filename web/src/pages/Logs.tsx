@@ -1,3 +1,4 @@
+import { TimeRangePicker } from '@/components/ui/TimeRangePicker';
 import { FilterField } from '@/components/ui/FilterField';
 import { Input, Label } from '@/components/ui';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/Tabs';
@@ -10,7 +11,6 @@ import {
   BarChart3,
   Braces,
   ChevronDown,
-  Clock,
   Download,
   FileSearch,
   ListFilter,
@@ -50,6 +50,7 @@ import {
   type LogScope,
   type LogSearchRequest,
 } from '@/api/logs';
+import { absoluteWindow, correlationFilters, logTraceLink, localDateTime } from '@/lib/telemetryContext';
 import { ApiError } from '@/api/client';
 import { listEdges, type Edge, type EdgeRole } from '@/api/edges';
 import { listNodes, type TopologyNode } from '@/api/topology';
@@ -290,9 +291,11 @@ function topologyNodeLabel(node: TopologyNode): string {
 
 export default function LogsPage() {
   const { tr } = useI18n();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const requestedRange = searchParams.get('range') || '';
-  const initialRange = RANGE_PRESETS.some((item) => item.value === requestedRange && item.value !== 'custom')
+  const linkedWindow = absoluteWindow(searchParams);
+  const linkedFilters = useMemo(() => correlationFilters(searchParams), [searchParams]);
+  const initialRange = linkedWindow ? 'custom' : RANGE_PRESETS.some((item) => item.value === requestedRange && item.value !== 'custom')
     ? requestedRange
     : '1h';
   const initialScope: ScopeDraft = {
@@ -305,8 +308,8 @@ export default function LogsPage() {
     nodes: searchParams.get('node')?.trim() || '',
   };
   const [range, setRange] = useState(initialRange);
-  const [customStart, setCustomStart] = useState('');
-  const [customEnd, setCustomEnd] = useState('');
+  const [customStart, setCustomStart] = useState(localDateTime(linkedWindow?.start || ''));
+  const [customEnd, setCustomEnd] = useState(localDateTime(linkedWindow?.end || ''));
   const [query, setQuery] = useState('');
   const [committedQuery, setCommittedQuery] = useState('');
   const [exclude, setExclude] = useState('');
@@ -432,6 +435,7 @@ export default function LogsPage() {
       start: timeWindow.start,
       end: timeWindow.end,
       scope: buildScope(committedScope),
+      filters: linkedFilters,
       keywords: {
         include: keywordValues(committedQuery, committedMode),
         exclude: keywordValues(committedExclude, 'any'),
@@ -440,7 +444,7 @@ export default function LogsPage() {
       limit: PAGE_LIMIT,
       direction: 'backward',
     };
-  }, [buildScope, committedExclude, committedMode, committedQuery, committedScope, resolveWindow]);
+  }, [buildScope, committedExclude, committedMode, committedQuery, committedScope, resolveWindow, linkedFilters]);
 
   const replaceNextCursor = useCallback((cursor: string) => {
     nextCursorRef.current = cursor;
@@ -864,16 +868,7 @@ export default function LogsPage() {
             </div>
           )}
 
-          {range === 'custom' && (
-            <div className="flex flex-wrap items-center gap-2">
-              <FilterField label={tr('开始时间', 'Start time')}>
-                <Input aria-label={tr('开始时间', 'Start time')} type="datetime-local" step="1" value={customStart} onChange={(event) => setCustomStart(event.target.value)} className="w-52" />
-              </FilterField>
-              <FilterField label={tr('结束时间', 'End time')}>
-                <Input aria-label={tr('结束时间', 'End time')} type="datetime-local" step="1" value={customEnd} onChange={(event) => setCustomEnd(event.target.value)} className="w-52" />
-              </FilterField>
-            </div>
-          )}
+
 
           <div className="flex min-h-6 flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-1.5">
@@ -904,11 +899,17 @@ export default function LogsPage() {
           </div>
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="rounded border border-zinc-800 bg-zinc-900 px-2 py-1 text-zinc-500">{tr('粒度', 'Interval')} {bucketInterval}</span>
-            <FilterField label={<><Clock size={11} />{tr('时间', 'Time')}</>}>
-              <Select aria-label={tr('时间范围', 'Time range')} value={range} onValueChange={(selectedValue) => { setRange(selectedValue); setTimeHistory([]); setLive(false); }} >
-                {RANGE_PRESETS.map((item) => <option key={item.value} value={item.value} className="bg-zinc-900">{tr(item.zh, item.en)}</option>)}
-              </Select>
-            </FilterField>
+            <TimeRangePicker
+              value={{ range, start: range === 'custom' ? customStart : undefined, end: range === 'custom' ? customEnd : undefined }}
+              presets={RANGE_PRESETS.filter((item) => item.value !== 'custom').map((item) => ({ value: item.value, label: tr(item.zh, item.en), durationMs: rangeToMs(item.value) }))}
+              onChange={(selection) => {
+                setRange(selection.range);
+                setCustomStart(localDateTime(selection.start));
+                setCustomEnd(localDateTime(selection.end));
+                setTimeHistory([]);
+                setLive(false);
+              }}
+            />
             <Button variant="outline" type="button" onClick={() => setLive((value) => !value)} className={cn('inline-flex h-9 items-center gap-1.5 rounded-md border px-2.5 text-xs', live ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-500' : 'border-zinc-800 bg-zinc-900 text-zinc-400')}>
               {live ? <Pause size={11} /> : <Play size={11} />}{live ? tr('实时中', 'Live') : tr('实时', 'Live')}
             </Button>
@@ -979,7 +980,10 @@ export default function LogsPage() {
         </div>
       </section>
 
-      <TabsContent value={viewMode} className="contents">
+      <TabsContent value={viewMode} className="contents">{linkedFilters.length > 0 && <div className="flex flex-wrap items-center gap-3 border-b border-zinc-800 px-6 py-2 text-xs text-zinc-500">
+        <span>{tr('关联筛选：', 'Correlation filters: ')}{linkedFilters.map(f => `${f.field}=${f.values?.[0] || '∅'}`).join(' · ')}</span>
+        <Button onClick={() => { const next = new URLSearchParams(searchParams); for (const filter of linkedFilters) next.delete(filter.field); setSearchParams(next); }}>{tr('清除关联筛选', 'Clear correlation filters')}</Button>
+      </div>}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {showFieldPanel && <FieldPanel fields={displayFields} visibleFields={visibleFields} search={fieldSearch} onSearch={setFieldSearch} onToggle={toggleDisplayField} tr={tr} />}
         <section ref={resultScrollRef} className="min-w-0 flex-1 overflow-y-auto bg-zinc-950/20">
@@ -1077,7 +1081,7 @@ function LogRow({ index, record, visibleFields, deviceLabels, clusterLabels, wra
       <span className="flex items-start gap-2 whitespace-nowrap tabular-nums text-zinc-600"><span className={cn('mt-1 h-1.5 w-1.5 shrink-0 rounded-full', color)} />{formatLogDateTime(timestamp)}</span>
       <span className={cn('text-zinc-200', wrap ? 'min-w-0 whitespace-pre-wrap break-words' : 'whitespace-nowrap pr-4')}>
         {fieldValues.map((item) => <Tag key={item.field} label={DISPLAY_FIELD_LABELS[item.field]?.zh ?? item.field} value={item.value} tone={item.field === 'level' ? level : ''} />)}
-        <span>{record.message}</span>
+        <RecordTraceLink record={record} /><span>{record.message}</span>
       </span>
     </div>
   );
@@ -1101,7 +1105,7 @@ function LogTable({ records, visibleFields, deviceLabels, clusterLabels, wrap, d
               <td className={cn('px-3 text-right text-zinc-700', dense ? 'py-1' : 'py-2')}>{index + 1}</td>
               <td className={cn('whitespace-nowrap px-3 tabular-nums text-zinc-600', dense ? 'py-1' : 'py-2')}>{formatLogDateTime(new Date(record.timestamp))}</td>
               {visibleFields.map((field) => <td key={field} className={cn('px-3', dense ? 'py-1' : 'py-2', wrap ? 'max-w-48 break-words' : 'whitespace-nowrap')}>{displayFieldValue(record, field, deviceLabels, clusterLabels) || '—'}</td>)}
-              <td className={cn('px-3 text-zinc-200', dense ? 'py-1' : 'py-2', wrap ? 'whitespace-pre-wrap break-words' : 'whitespace-nowrap')}>{record.message}</td>
+              <td className={cn('px-3 text-zinc-200', dense ? 'py-1' : 'py-2', wrap ? 'whitespace-pre-wrap break-words' : 'whitespace-nowrap')}><RecordTraceLink record={record} />{record.message}</td>
             </tr>
           ))}
         </tbody>
@@ -1113,4 +1117,11 @@ function LogTable({ records, visibleFields, deviceLabels, clusterLabels, wrap, d
 function Tag({ label, value, tone = '' }: { label: string; value: string; tone?: string }) {
   const semantic = /fatal|error|critical|panic/.test(tone) ? 'border-red-500/30 bg-red-500/10 text-red-400' : /warn/.test(tone) ? 'border-amber-500/30 bg-amber-500/10 text-amber-400' : 'border-zinc-800 bg-zinc-900 text-zinc-500';
   return <span className={cn('mr-1 inline-flex rounded border px-1 py-px align-baseline text-[9px]', semantic)}><span className="mr-0.5 opacity-60">{label}:</span>{value}</span>;
+}
+
+function RecordTraceLink({ record }: { record: LogRecord }) {
+  const [params] = useSearchParams();
+  const { tr } = useI18n();
+  const link = logTraceLink(record, params);
+  return link ? <Link className="mr-2 underline" to={link} aria-label={tr('打开链路', 'Open trace')}>{record.trace_id?.slice(0, 12)}…</Link> : null;
 }

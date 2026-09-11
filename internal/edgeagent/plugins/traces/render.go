@@ -83,6 +83,9 @@ processors:
   # to set them.
   resource/device:
     attributes:
+      - key: deployment.environment.name
+        from_attribute: deployment.environment
+        action: insert
 {{- if .EmitDeviceID }}
       - key: device_id
         value: "{{ .EdgeID }}"
@@ -95,6 +98,25 @@ processors:
       - key: {{ $k }}
         value: "{{ $v }}"
         action: upsert
+{{- end }}
+{{- if .MetricsEnabled }}
+
+  # gRPC's official Python plugin uses grpc.* names for the same server RED
+  # histogram. Normalize only that metric; preserve its seconds and buckets.
+  transform/grpc_metrics:
+    error_mode: ignore
+    metric_statements:
+      - context: datapoint
+        conditions:
+          - metric.name == "grpc.server.call.duration"
+        statements:
+          - set(attributes["rpc.system.name"], "grpc")
+          - set(attributes["rpc.method"], attributes["grpc.method"])
+          - replace_pattern(attributes["rpc.method"], "^/", "")
+          - set(attributes["rpc.response.status_code"], attributes["grpc.status"])
+      - context: metric
+        statements:
+          - set(name, "rpc.server.call.duration") where name == "grpc.server.call.duration"
 {{- end }}
 {{- if .LogsEnabled }}
 
@@ -110,7 +132,7 @@ processors:
         from_attribute: k8s.node.name
         action: upsert
       - key: loki.resource.labels
-        value: "cluster_id,namespace,pod,node,ongrid_source,telemetry_gateway,gateway_namespace,service.name,k8s.deployment.name,k8s.statefulset.name,k8s.daemonset.name,k8s.job.name,k8s.cronjob.name"
+        value: "cluster_id,namespace,pod,node,ongrid_source,telemetry_gateway,gateway_namespace,service.name,service.namespace,deployment.environment.name,k8s.deployment.name,k8s.statefulset.name,k8s.daemonset.name,k8s.job.name,k8s.cronjob.name"
         action: upsert
 {{- end }}
 
@@ -257,7 +279,7 @@ service:
 {{- if .MetricsEnabled }}
     metrics:
       receivers: [otlp]
-      processors: [{{ if .BoundedPipelines }}memory_limiter, {{ end }}{{ if .K8sAttributesEnabled }}k8sattributes, {{ end }}resource/device, {{ if .BoundedPipelines }}batch/metrics{{ else }}batch{{ end }}]
+      processors: [{{ if .BoundedPipelines }}memory_limiter, {{ end }}{{ if .K8sAttributesEnabled }}k8sattributes, {{ end }}resource/device, transform/grpc_metrics, {{ if .BoundedPipelines }}batch/metrics{{ else }}batch{{ end }}]
       exporters: [{{ if .MetricsRemoteWriteEnabled }}prometheusremotewrite/manager{{ else }}prometheus/gateway{{ end }}]
 {{- end }}
 `
