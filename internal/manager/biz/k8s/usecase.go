@@ -41,6 +41,8 @@ const (
 
 // Repository is the k8s bounded context persistence contract.
 type Repository interface {
+	UpdateAutoAPM(ctx context.Context, clusterID uint64, specJSON string) error
+	ListAutoAPMSpecs(ctx context.Context) ([]string, error)
 	CreateCluster(ctx context.Context, c *model.Cluster) error
 	GetCluster(ctx context.Context, id uint64) (*model.Cluster, error)
 	GetClusterByControllerEdge(ctx context.Context, edgeID uint64) (*model.Cluster, error)
@@ -222,6 +224,8 @@ type TelemetryTargetResolver interface {
 }
 
 type Usecase struct {
+	autoAPMEnvironment func(context.Context, uint64) (string, error)
+	autoAPMNotify      func(context.Context, uint64)
 	repo               Repository
 	edgeIssuer         EdgeIssuer
 	edgeRemover        EdgeRemover
@@ -1353,6 +1357,7 @@ type EnrollResult struct {
 // by that controller into a Kubernetes Secret. Secrets are never persisted in
 // plaintext by manager.
 type TelemetryConfig struct {
+	ClusterNodeID          uint64
 	ClusterID              uint64
 	AccessKey              string
 	SecretKey              string
@@ -1441,7 +1446,7 @@ func (u *Usecase) RefreshTelemetryConfig(ctx context.Context, controllerEdgeID u
 	if proof.AccessKey != "" {
 		current, lookupErr := u.repo.GetTelemetryCredentialByAccessKey(ctx, proof.AccessKey)
 		if lookupErr == nil && current != nil && current.ClusterID == cluster.ID && passwd.Verify(proof.SecretKey, current.SecretKeyHash) {
-			return u.resolveTelemetryConfig(ctx, cluster.ID, proof.AccessKey, proof.SecretKey)
+			return u.resolveTelemetryConfig(ctx, cluster, proof.AccessKey, proof.SecretKey)
 		}
 		if lookupErr != nil && !errors.Is(lookupErr, errs.ErrNotFound) {
 			return nil, fmt.Errorf("look up kubernetes telemetry credential: %w", lookupErr)
@@ -1451,7 +1456,7 @@ func (u *Usecase) RefreshTelemetryConfig(ctx context.Context, controllerEdgeID u
 	if err != nil {
 		return nil, err
 	}
-	config, err := u.resolveTelemetryConfig(ctx, cluster.ID, accessKey, secretKey)
+	config, err := u.resolveTelemetryConfig(ctx, cluster, accessKey, secretKey)
 	if err != nil {
 		return nil, fmt.Errorf("resolve kubernetes telemetry config: %w", err)
 	}
@@ -2229,7 +2234,7 @@ func (u *Usecase) enrollController(ctx context.Context, c *model.Cluster, in Enr
 		}
 		return nil, err
 	}
-	telemetry, err := u.resolveTelemetryConfig(ctx, c.ID, telemetryAccessKey, telemetrySecretKey)
+	telemetry, err := u.resolveTelemetryConfig(ctx, c, telemetryAccessKey, telemetrySecretKey)
 	if err != nil {
 		if created {
 			return nil, u.compensateCreatedEdge(ctx, cred.EdgeID, fmt.Errorf("resolve kubernetes telemetry config: %w", err))
@@ -2270,13 +2275,16 @@ func newTelemetryCredential(clusterID uint64) (*model.TelemetryCredential, strin
 	}, accessKey, secretKey, nil
 }
 
-func (u *Usecase) resolveTelemetryConfig(ctx context.Context, clusterID uint64, accessKey, secretKey string) (*TelemetryConfig, error) {
+func (u *Usecase) resolveTelemetryConfig(ctx context.Context, cluster *model.Cluster, accessKey, secretKey string) (*TelemetryConfig, error) {
 	publicURL := strings.TrimRight(strings.TrimSpace(u.cfg.PublicURL), "/")
 	out := &TelemetryConfig{
-		ClusterID:        clusterID,
+		ClusterID:        cluster.ID,
 		AccessKey:        accessKey,
 		SecretKey:        secretKey,
 		ManagerPublicURL: publicURL,
+	}
+	if cluster.NodeID != nil {
+		out.ClusterNodeID = *cluster.NodeID
 	}
 	traces, err := u.resolveTelemetryTarget(ctx, TelemetrySignalTraces, endpointPath(publicURL, "/v1/traces"))
 	if err != nil {

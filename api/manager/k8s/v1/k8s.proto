@@ -3,6 +3,7 @@ syntax = "proto3";
 package ongrid.manager.k8s.v1;
 
 import "google/protobuf/timestamp.proto";
+import "manager/edge/v1/edge.proto";
 
 option go_package = "github.com/ongridio/ongrid/api/gen/manager/k8s/v1;k8sv1";
 
@@ -10,6 +11,8 @@ option go_package = "github.com/ongridio/ongrid/api/gen/manager/k8s/v1;k8sv1";
 service KubernetesService {
     rpc CreateCluster(CreateClusterRequest) returns (CreateClusterResponse);
     rpc ListClusters(ListClustersRequest) returns (ListClustersResponse);
+    rpc GetAutoAPM(GetAutoAPMRequest) returns (GetAutoAPMResponse);
+    rpc SetAutoAPM(SetAutoAPMRequest) returns (SetAutoAPMResponse);
     rpc GetCluster(GetClusterRequest) returns (GetClusterResponse);
     rpc GetClusterHealth(GetClusterHealthRequest) returns (GetClusterHealthResponse);
     rpc ListEdgeAttachments(ListEdgeAttachmentsRequest) returns (ListEdgeAttachmentsResponse);
@@ -387,4 +390,44 @@ message EnrollResponse {
     string secret_key = 6 [json_name = "secret_key"];
     string cloud_addr = 7 [json_name = "cloud_addr"];
     string manager_public_url = 8 [json_name = "manager_public_url"];
+}
+
+// GET/PUT /v1/k8s/clusters/{cluster_id}/autoapm. PUT requires admin.
+message GetAutoAPMRequest { uint64 cluster_id = 1; }
+message SetAutoAPMRequest {
+    uint64 cluster_id = 1;
+    ongrid.manager.edge.v1.AutoAPMSpec spec = 2;
+}
+message GetAutoAPMResponse {
+    ongrid.manager.edge.v1.AutoAPMSpec spec = 1;
+    ongrid.manager.edge.v1.AutoAPMDefaults defaults = 2;
+}
+message SetAutoAPMResponse {
+    ongrid.manager.edge.v1.AutoAPMSpec spec = 1;
+    ongrid.manager.edge.v1.AutoAPMDefaults defaults = 2;
+}
+
+// Internal controller telemetry-config response. cluster_id remains the registration ID.
+message KubernetesTelemetryConfig {
+    uint64 cluster_id = 1;
+    string access_key = 2;
+    string secret_key = 3;
+    string manager_public_url = 4;
+    string traces_endpoint = 5;
+    string traces_auth_mode = 6;
+    string traces_basic_user = 7;
+    string traces_basic_pass = 8;
+    bool traces_tls_insecure = 9;
+    string logs_endpoint = 10;
+    string logs_auth_mode = 11;
+    string logs_basic_user = 12;
+    string logs_basic_pass = 13;
+    bool logs_tls_insecure = 14;
+    string remote_write_endpoint = 15;
+    string remote_write_bearer = 16;
+    string remote_write_basic_user = 17;
+    string remote_write_basic_pass = 18;
+    bool remote_write_tls_insecure = 19;
+    string remote_write_tls_ca_pem = 20;
+    uint64 cluster_node_id = 21;
 }

@@ -316,7 +316,7 @@ export default function LogsPage() {
   const [committedExclude, setCommittedExclude] = useState('');
   const [matchMode, setMatchMode] = useState<LogMatchMode>('any');
   const [committedMode, setCommittedMode] = useState<LogMatchMode>('any');
-  const [deviceID, setDeviceID] = useState('');
+  const [deviceID, setDeviceID] = useState(searchParams.get('device_id') || '');
   const [role, setRole] = useState<'' | EdgeRole>('');
   const [scopeDraft, setScopeDraft] = useState<ScopeDraft>(() => initialScope);
   const [committedScope, setCommittedScope] = useState<ScopeDraft>(() => initialScope);
@@ -401,8 +401,7 @@ export default function LogsPage() {
 
   const directDeviceIDs = useMemo(() => {
     if (!deviceID) return null;
-    const id = Number(deviceID);
-    return Number.isInteger(id) && id > 0 ? [id] : NO_SELECTED_DEVICE_IDS;
+    return splitValues(deviceID).map(Number).filter((id) => Number.isInteger(id) && id > 0);
   }, [deviceID]);
 
   const roleDeviceIDs = useMemo(() => {
@@ -1025,6 +1024,7 @@ function ToolbarSelect({ label, value, onChange, options, empty, wide = false }:
     <FilterField label={label} className={cn('shrink-0', wide ? 'w-64' : 'w-52')}>
       <Select aria-label={label} value={value} onValueChange={(selectedValue) => onChange(selectedValue)} className="min-w-0 flex-1">
         <option value="" className="bg-zinc-900">{empty}</option>
+        {value && !options.some((option) => option.value === value) && <option value={value}>{value}</option>}
         {options.map((option) => <option key={option.value} value={option.value} className="bg-zinc-900">{option.label}</option>)}
       </Select>
     </FilterField>

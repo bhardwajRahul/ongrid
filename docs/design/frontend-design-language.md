@@ -5,7 +5,7 @@
 ## 开发入口与维护边界
 
 - 页面骨架复用 [PageHeader](../../web/src/components/ui/PageHeader.tsx)、[Card](../../web/src/components/ui/Card.tsx)、[EmptyState](../../web/src/components/ui/EmptyState.tsx) 和 [PaginationFooter](../../web/src/components/ui/PaginationFooter.tsx)。参考 [设备](../../web/src/pages/Edges.tsx)、[日志](../../web/src/pages/Logs.tsx)、[监控](../../web/src/pages/Monitor.tsx) 的对应区域。
-- 控件从 [components/ui](../../web/src/components/ui/) 导入。复杂交互由 Base UI 支撑，原生输入继续保留浏览器验证和事件；外观借鉴 shadcn/ui，并适配本项目 Tailwind 3 和主题变量，不直接复制另一套主题或升级框架。
+- 控件统一复用 [components/ui](../../web/src/components/ui/) 中的 **shadcn/ui 风格与派生组件实现**。复杂交互由 **Base UI** 支撑，原生输入继续保留浏览器验证和事件；统一适配本项目 Tailwind 3、主题变量和组件 API。新增控件先复用已有实现，缺失时在公共层按同一体系补齐，不在业务页面另写一套，也不直接复制另一套主题或升级框架。
 - 公共外观和状态维护在 [styles/index.css](../../web/src/styles/index.css) 的 `.og-*` 规则中；Tailwind 映射和字体见 [tailwind.config.ts](../../web/tailwind.config.ts)。页面 `className` 补充布局、宽度、图标让位和代码字体，避免重复覆盖边框、背景、圆角、字号与聚焦样式。
 - 本文是设计约定的集中维护入口。公共组件契约或视觉规则改变时，在同一个 PR 更新本文与相关测试；引用 shadcn 派生代码时保留 [MIT 许可](../../web/src/components/ui/shadcn.LICENSE)。
 
@@ -16,6 +16,8 @@
 3. 横向信息卡片左侧放标题、描述和元数据，右侧操作组与信息块垂直居中。窄屏允许操作组换到下一行，正文容器使用 `min-w-0`，避免按钮挤压正文。
 4. 保留密集表格的横向滚动，不要把整个页面撑出视口；长字段可截断并提供查看完整内容的入口。下拉选项可换行，不能只显示无法区分的前缀。
 5. 表单弹窗用 `Modal` 的 `sm` / `md` / `lg` / `xl` 预设；宽度受视口约束，长内容在正文区滚动，标题与底部操作保持可达。不要额外叠加互相冲突的 `max-w-*`。确实需要用户调宽时用现有 `resizable`。
+6. 资源清单可将筛选栏与表格放在同一 `Card`，表格复用 `.og-resource-table` 的表头、行距与悬停样式。列表与配置详情随内容区宽度伸展，页头与正文保持对齐，不以固定最大宽度造成宽屏两侧大面积留白；阅读宽度限制仅用于长文本或表单。已保存目标按列展示，新增操作保留在列表底部。发现结果选择使用 `Radio` 配合 `.og-choice-row`，整行 `label` 可点击，选中和禁用状态保持一致；已配置范围明确标注，不能只显示一个不可点击的单选框。
+7. 采集配置详情的表格使用 `.og-resource-table[data-variant="quiet"]`：表头与正文共用卡片底色，仅保留淡化的行间分隔；卡片标题和底部新增入口通过间距区分，不重复添加横线。
 
 ## 配色、文字与图标
 
@@ -51,6 +53,7 @@
 | 多行输入 | `Textarea`；组合搜索栏、聊天输入使用 `variant="inset"`，边框由外层提供 |
 | 列表搜索 | `Input type="search"`，透明表面融入页面，保留边框和聚焦反馈 |
 | 单选列表 | `Select`；通过 `options` 或已有 `<option>` 子元素提供选项 |
+| 可复用已有值，也允许输入新值 | `Autocomplete`；例如环境、服务命名空间，使用 Base UI 交互及公共输入框和浮层样式，避免原生 `datalist` 的主题差异 |
 | 复选、开关、互斥选择、范围 | `Checkbox` / `Switch` / `Radio` / `Slider` |
 | 元数据与状态 | `Chip`（亦导出为 `Badge`） |
 

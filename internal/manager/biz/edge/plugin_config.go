@@ -8,6 +8,7 @@ import (
 	"log/slog"
 
 	model "github.com/ongridio/ongrid/internal/manager/model/edge"
+	"github.com/ongridio/ongrid/internal/pkg/autoapm"
 	"github.com/ongridio/ongrid/internal/pkg/errs"
 	"github.com/ongridio/ongrid/internal/pkg/tunnel"
 )
@@ -16,6 +17,7 @@ import (
 // needs. *sqlite.PluginConfigRepo satisfies it.
 type PluginConfigRepo interface {
 	ListByEdge(ctx context.Context, edgeID uint64) ([]*model.PluginConfig, error)
+	ListAutoAPMSpecs(ctx context.Context) ([]string, error)
 	Get(ctx context.Context, edgeID uint64, plugin string) (*model.PluginConfig, error)
 	Upsert(ctx context.Context, in *model.PluginConfig) (*model.PluginConfig, error)
 	Delete(ctx context.Context, edgeID uint64, plugin string) error
@@ -67,12 +69,17 @@ type PluginRuntimeOverlayProvider interface {
 // the affected edge so changes propagate within seconds, not within the
 // edge's 60s safety-net poll window.
 type PluginConfigUC struct {
-	repo         PluginConfigRepo
-	notifier     EdgeReloadNotifier
-	secretWriter DatabaseMetricsSecretWriter
-	resolver     EndpointResolver
-	runtime      PluginRuntimeOverlayProvider
-	log          *slog.Logger
+	kubernetesTelemetryCluster func(context.Context, uint64) (uint64, uint64, error)
+	kubernetesLogPaths         func(context.Context, uint64) ([]string, bool, error)
+	kubernetesAutoAPM          func(context.Context, uint64) (*autoapm.Spec, bool, error)
+	kubernetesAutoAPMSpecs     func(context.Context) ([]string, error)
+	repo                       PluginConfigRepo
+	notifier                   EdgeReloadNotifier
+	secretWriter               DatabaseMetricsSecretWriter
+	resolver                   EndpointResolver
+	runtime                    PluginRuntimeOverlayProvider
+	autoAPMEnvironment         func(context.Context, uint64) (string, string, error)
+	log                        *slog.Logger
 }
 
 var _ PluginConfigSeeder = (*PluginConfigUC)(nil)
@@ -118,20 +125,74 @@ func (uc *PluginConfigUC) SetRuntimeOverlayProvider(provider PluginRuntimeOverla
 	uc.runtime = provider
 }
 
+func (uc *PluginConfigUC) SetAutoAPMEnvironmentProvider(provider func(context.Context, uint64) (string, string, error)) {
+	uc.autoAPMEnvironment = provider
+}
+
+func (uc *PluginConfigUC) SetKubernetesAutoAPMProvider(provider func(context.Context, uint64) (*autoapm.Spec, bool, error), specs func(context.Context) ([]string, error)) {
+	uc.kubernetesAutoAPM, uc.kubernetesAutoAPMSpecs = provider, specs
+}
+
+func (uc *PluginConfigUC) SetKubernetesTelemetryProvider(provider func(context.Context, uint64) (uint64, uint64, error)) {
+	uc.kubernetesTelemetryCluster = provider
+}
+
+func (uc *PluginConfigUC) NotifyAutoAPMChanged(ctx context.Context, edgeID uint64) {
+	uc.notify(ctx, edgeID, model.PluginNameAutoAPM)
+}
+
+type AutoAPMDefaults struct {
+	Environment string `json:"environment"`
+	ClusterName string `json:"cluster_name"`
+}
+
+func (uc *PluginConfigUC) autoAPMDefaults(ctx context.Context, edgeID uint64) (*AutoAPMDefaults, error) {
+	if uc.autoAPMEnvironment == nil {
+		return nil, nil
+	}
+	environment, cluster, err := uc.autoAPMEnvironment(ctx, edgeID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve auto APM environment: %w", err)
+	}
+	return &AutoAPMDefaults{Environment: environment, ClusterName: cluster}, nil
+}
+
 // IsEnabled resolves the effective plugin policy for one Edge. An explicit
 // row wins; otherwise the same default used by ListForUI/FetchForEdge applies.
 func (uc *PluginConfigUC) IsEnabled(ctx context.Context, edgeID uint64, plugin string) (bool, error) {
 	if edgeID == 0 || !model.IsKnownPluginName(plugin) {
 		return false, errs.ErrInvalid
 	}
-	row, err := uc.repo.Get(ctx, edgeID, plugin)
-	if errors.Is(err, errs.ErrNotFound) {
-		return pluginDefaultEnabled[plugin], nil
+	if plugin == model.PluginNameLogs {
+		if cfg, managed, err := uc.kubernetesLogsConfig(ctx, edgeID); err != nil || managed {
+			return cfg.Enabled, err
+		}
 	}
-	if err != nil {
+	if plugin == model.PluginNameAutoAPM {
+		if uc.kubernetesAutoAPM != nil {
+			spec, managed, err := uc.kubernetesAutoAPM(ctx, edgeID)
+			if err != nil {
+				return false, err
+			}
+			if managed && spec == nil {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+	row, err := uc.repo.Get(ctx, edgeID, plugin)
+	cfg := WireConfig{Enabled: pluginDefaultEnabled[plugin]}
+	if err != nil && !errors.Is(err, errs.ErrNotFound) {
 		return false, err
 	}
-	return row.Enabled, nil
+	if row != nil {
+		cfg.Enabled, cfg.Spec = row.Enabled, decodeSpec(row.SpecJSON)
+	}
+	if plugin == model.PluginNameLogs {
+		cfg, err = uc.hostLogsConfig(ctx, edgeID, cfg)
+		return cfg.Enabled, err
+	}
+	return cfg.Enabled, nil
 }
 
 // PluginRow is the UI/HTTP-friendly view of one plugin row.
@@ -139,6 +200,7 @@ type PluginRow struct {
 	PluginName string                 `json:"plugin_name"`
 	Enabled    bool                   `json:"enabled"`
 	Spec       map[string]interface{} `json:"spec,omitempty"`
+	Defaults   *AutoAPMDefaults       `json:"defaults,omitempty"`
 }
 
 // pluginDefaultEnabled declares the on-by-default policy for fresh
@@ -197,6 +259,7 @@ func (uc *PluginConfigUC) ListForUI(ctx context.Context, edgeID uint64) ([]Plugi
 		model.PluginNameLogs,
 		model.PluginNameTraces,
 		model.PluginNameProfiles,
+		model.PluginNameAutoAPM,
 		model.PluginNameHostMetrics,
 		model.PluginNameProcMetrics,
 		model.PluginNameCustomMetrics,
@@ -209,6 +272,43 @@ func (uc *PluginConfigUC) ListForUI(ctx context.Context, edgeID uint64) ([]Plugi
 			// Explicit DB row always wins — preserves operator opt-out.
 			row.Enabled = r.Enabled
 			row.Spec = decodeSpec(r.SpecJSON)
+		}
+		if name == model.PluginNameLogs {
+			cfg, managed, err := uc.kubernetesLogsConfig(ctx, edgeID)
+			if err != nil {
+				return nil, err
+			}
+			if managed {
+				row.Enabled = cfg.Enabled
+				row.Spec = mergeRuntimeOverlay(row.Spec, cfg.Spec)
+			} else {
+				effective, err := uc.hostLogsConfig(ctx, edgeID, WireConfig{Enabled: row.Enabled, Spec: row.Spec})
+				if err != nil {
+					return nil, err
+				}
+				row.Enabled = effective.Enabled
+			}
+		}
+		if name == model.PluginNameAutoAPM {
+			row.Enabled = true
+			if uc.kubernetesAutoAPM != nil {
+				spec, managed, err := uc.kubernetesAutoAPM(ctx, edgeID)
+				if err != nil {
+					return nil, err
+				}
+				if managed {
+					row.Spec = nil
+					if spec == nil {
+						row.Enabled = false
+					} else {
+						row.Spec = spec.Map()
+					}
+				}
+			}
+			row.Defaults, err = uc.autoAPMDefaults(ctx, edgeID)
+			if err != nil {
+				return nil, err
+			}
 		}
 		out = append(out, row)
 	}
@@ -233,6 +333,40 @@ func (uc *PluginConfigUC) Set(ctx context.Context, edgeID uint64, plugin string,
 	var databaseSecretReqs []tunnel.WriteDatabaseMetricsSecretRequest
 	var previous *model.PluginConfig
 	switch plugin {
+	case model.PluginNameLogs:
+		if _, managed, err := uc.kubernetesLogsConfig(ctx, edgeID); err != nil {
+			return nil, err
+		} else if managed {
+			return nil, fmt.Errorf("%w: configure Kubernetes log capture in service discovery", errs.ErrInvalid)
+		}
+	case model.PluginNameAutoAPM:
+		if uc.kubernetesAutoAPM != nil {
+			_, managed, err := uc.kubernetesAutoAPM(ctx, edgeID)
+			if err != nil {
+				return nil, err
+			}
+			if managed {
+				return nil, fmt.Errorf("%w: configure Kubernetes capture on the cluster", errs.ErrInvalid)
+			}
+		}
+		// Discovery stays on; an empty selection stops capture.
+		in.Enabled = true
+		if in.Spec == nil {
+			previous, err := uc.repo.Get(ctx, edgeID, plugin)
+			if err != nil && !errors.Is(err, errs.ErrNotFound) {
+				return nil, err
+			}
+			if previous != nil {
+				in.Spec = decodeSpec(previous.SpecJSON)
+			}
+		}
+		if spec, err := autoapm.Parse(in.Spec); err != nil {
+			return nil, fmt.Errorf("%w: %s", errs.ErrInvalid, err)
+		} else if spec.ClusterID != 0 || spec.K8sClusterID != 0 {
+			return nil, fmt.Errorf("%w: cluster identities are manager-owned", errs.ErrInvalid)
+		} else if spec.Kubernetes != nil {
+			return nil, fmt.Errorf("%w: Kubernetes rules require a cluster", errs.ErrInvalid)
+		}
 	case model.PluginNameCustomMetrics:
 		if err := validateCustomMetricsSpec(in.Spec); err != nil {
 			return nil, err
@@ -309,10 +443,17 @@ func (uc *PluginConfigUC) rollbackPluginConfig(ctx context.Context, edgeID uint6
 // / traces on first connect so Monitor panels and log/trace ingestion
 // just work. Any explicit DB row (operator opt-out via UI) beats the
 // default — table lookup wins.
-func (uc *PluginConfigUC) FetchForEdge(ctx context.Context, edgeID uint64) (*WireSnapshot, error) {
+func (uc *PluginConfigUC) FetchForEdge(ctx context.Context, edgeID uint64, unifiedClusterIdentity bool) (*WireSnapshot, error) {
 	rows, err := uc.repo.ListByEdge(ctx, edgeID)
 	if err != nil {
 		return nil, err
+	}
+	var clusterID, k8sClusterID uint64
+	if uc.kubernetesTelemetryCluster != nil {
+		clusterID, k8sClusterID, err = uc.kubernetesTelemetryCluster(ctx, edgeID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve telemetry cluster identity: %w", err)
+		}
 	}
 	have := map[string]*model.PluginConfig{}
 	for _, r := range rows {
@@ -324,6 +465,7 @@ func (uc *PluginConfigUC) FetchForEdge(ctx context.Context, edgeID uint64) (*Wir
 		model.PluginNameLogs,
 		model.PluginNameTraces,
 		model.PluginNameProfiles,
+		model.PluginNameAutoAPM,
 		model.PluginNameHostMetrics,
 		model.PluginNameProcMetrics,
 		model.PluginNameCustomMetrics,
@@ -336,12 +478,44 @@ func (uc *PluginConfigUC) FetchForEdge(ctx context.Context, edgeID uint64) (*Wir
 			Endpoint: uc.resolver.Endpoint(ctx, name),
 			Enabled:  pluginDefaultEnabled[name],
 		}
+		if name == model.PluginNameAutoAPM {
+			cfg.Endpoint = uc.resolver.Endpoint(ctx, model.PluginNameTraces)
+		}
 		if r, ok := have[name]; ok {
 			// Explicit row wins. This preserves opt-out: an operator
 			// who turns hostmetrics off via the UI lands a row with
 			// Enabled=false and the default does not override it.
 			cfg.Enabled = r.Enabled
 			cfg.Spec = decodeSpec(r.SpecJSON)
+		}
+		if name == model.PluginNameAutoAPM {
+			cfg.Enabled = true
+			clusterManaged := false
+			if uc.kubernetesAutoAPM != nil {
+				spec, managed, err := uc.kubernetesAutoAPM(ctx, edgeID)
+				if err != nil {
+					return nil, fmt.Errorf("resolve Kubernetes capture settings: %w", err)
+				}
+				clusterManaged = managed
+				if managed {
+					cfg.Spec = nil
+					if spec == nil {
+						cfg.Enabled = false
+					} else {
+						cfg.Spec = spec.Map()
+					}
+				}
+			}
+			if !clusterManaged {
+				defaults, err := uc.autoAPMDefaults(ctx, edgeID)
+				if err != nil {
+					return nil, err
+				}
+				if defaults != nil {
+					// The device owns the default, including clearing a legacy Edge value.
+					cfg.Spec = mergeRuntimeOverlay(cfg.Spec, map[string]interface{}{"environment": defaults.Environment})
+				}
+			}
 		}
 		if uc.runtime != nil {
 			overlay, overlayErr := uc.runtime.PluginRuntimeOverlay(ctx, edgeID, name)
@@ -350,6 +524,53 @@ func (uc *PluginConfigUC) FetchForEdge(ctx context.Context, edgeID uint64) (*Wir
 			}
 			if len(overlay) > 0 {
 				cfg.Spec = mergeRuntimeOverlay(cfg.Spec, overlay)
+			}
+		}
+		if name == model.PluginNameLogs {
+			selected, managed, err := uc.kubernetesLogsConfig(ctx, edgeID)
+			if err != nil {
+				return nil, fmt.Errorf("resolve Kubernetes log scope: %w", err)
+			}
+			if managed {
+				cfg.Enabled = selected.Enabled
+				cfg.Spec = mergeRuntimeOverlay(cfg.Spec, selected.Spec)
+			} else {
+				cfg, err = uc.hostLogsConfig(ctx, edgeID, cfg)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+		if name == model.PluginNameAutoAPM {
+			// Capture settings are uniform for hosts and Kubernetes, including
+			// configurations saved before these controls were removed from the UI.
+			cfg.Spec = mergeRuntimeOverlay(cfg.Spec, map[string]interface{}{
+				"sample_ratio": float64(1), "tls_insecure_skip_verify": true,
+			})
+			if targets, ok := cfg.Spec["targets"].([]interface{}); ok {
+				for _, target := range targets {
+					if fields, ok := target.(map[string]interface{}); ok {
+						delete(fields, "log_path")
+					}
+				}
+			}
+		}
+		if clusterID != 0 {
+			switch name {
+			case model.PluginNameAutoAPM:
+				if unifiedClusterIdentity && cfg.Spec["kubernetes"] != nil {
+					cfg.Spec = mergeRuntimeOverlay(cfg.Spec, map[string]interface{}{"cluster_id": clusterID, "k8s_cluster_id": k8sClusterID})
+				}
+			case model.PluginNameTraces:
+				extra, _ := cfg.Spec["extra_attrs"].(map[string]interface{})
+				extra = mergeRuntimeOverlay(extra, map[string]interface{}{"cluster_id": fmt.Sprint(k8sClusterID)})
+				delete(extra, "k8s_cluster_id")
+				if unifiedClusterIdentity {
+					extra["cluster_id"], extra["k8s_cluster_id"] = fmt.Sprint(clusterID), fmt.Sprint(k8sClusterID)
+				}
+				cfg.Spec = mergeRuntimeOverlay(cfg.Spec, map[string]interface{}{"extra_attrs": extra})
+			case model.PluginNameLogs:
+				cfg.Spec = mergeRuntimeOverlay(cfg.Spec, map[string]interface{}{"cluster_id": fmt.Sprint(clusterID)})
 			}
 		}
 		if cfg.Enabled {

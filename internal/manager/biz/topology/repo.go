@@ -45,6 +45,7 @@ type NodeRepo interface {
 	EnsureForDevice(ctx context.Context, deviceID uint64, name string) (*model.Node, error)
 	Create(ctx context.Context, n *model.Node) error
 	Update(ctx context.Context, id uint64, name, propsJSON string) error
+	MergeProps(ctx context.Context, id uint64, name *string, propsJSON string) error
 	Get(ctx context.Context, id uint64) (*model.Node, error)
 	GetMany(ctx context.Context, ids []uint64) (map[uint64]*model.Node, error)
 	List(ctx context.Context, f NodeListFilter) ([]*model.Node, error)

@@ -42,6 +42,8 @@ export type PluginTargetHealth = {
 // "subprocess binary missing" — that is what turns a silent empty-telemetry
 // failure into something an operator can see.
 export type PluginHealth = {
+  candidates?: { executable: string; port: number; pid: number }[];
+  discovery_error?: string;
   state: 'stopped' | 'starting' | 'running' | 'crashed' | string;
   last_error?: string;
   restart_count?: number;
@@ -61,7 +63,13 @@ export type PluginRow = {
   enabled: boolean;
   spec?: Record<string, unknown>;
   health?: PluginHealth;
+  defaults?: { environment: string; cluster_name: string };
 };
+
+export type AutoAPMOptions = { environments: string[]; namespaces: string[] };
+export function getAutoAPMOptions() {
+  return request<AutoAPMOptions>('GET', '/integrations/autoapm-options');
+}
 
 export type PluginListResp = { items: PluginRow[] };
 

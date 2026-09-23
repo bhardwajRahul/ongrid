@@ -638,6 +638,73 @@ func TestDeleteRelationTypeGuards(t *testing.T) {
 	}
 }
 
+func TestDeviceInClusterWithoutProperties(t *testing.T) {
+	uc, ctx := newUC(t), t.Context()
+	cluster, err := uc.CreateNode(ctx, "cluster", "unconfigured-cluster", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, err := uc.CreateNode(ctx, "device", "host", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := uc.AssignEnrollmentDevice(ctx, cluster.ID, device.ID, 11, 21); err != nil {
+		t.Fatal(err)
+	}
+	env, name, err := uc.DeviceClusterEnvironment(ctx, device.ID)
+	if err != nil || env != "" || name != cluster.Name {
+		t.Fatalf("cluster with no environment must not block device configuration: %q %q %v", env, name, err)
+	}
+}
+
+func TestClusterEnvironmentSurvivesInventoryAndCanBeCleared(t *testing.T) {
+	uc, ctx := newUC(t), context.Background()
+	id, err := uc.EnsureKubernetesCluster(ctx, 42, nil, "prod", "uid", "full-node", "online")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := uc.SetClusterEnvironment(ctx, id, "production"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := uc.EnsureKubernetesCluster(ctx, 42, &id, "prod", "uid", "full-node", "degraded"); err != nil {
+		t.Fatal(err)
+	}
+	node, err := uc.GetNode(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(node.PropsJSON, `"environment":"production"`) || !strings.Contains(node.PropsJSON, `"status":"degraded"`) {
+		t.Fatalf("properties lost: %s", node.PropsJSON)
+	}
+	device, err := uc.CreateNode(ctx, "device", "node1", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := uc.EnsureKubernetesNodeMembership(ctx, id, device.ID, 42, 20, "node1", "node-uid"); err != nil {
+		t.Fatal(err)
+	}
+	env, cluster, err := uc.DeviceClusterEnvironment(ctx, device.ID)
+	if err != nil || env != "production" || cluster != "prod" {
+		t.Fatalf("inheritance: %q %q %v", env, cluster, err)
+	}
+	if err := uc.SetClusterEnvironment(ctx, id, ""); err != nil {
+		t.Fatal(err)
+	}
+	env, _, err = uc.DeviceClusterEnvironment(ctx, device.ID)
+	if err != nil || env != "" {
+		t.Fatalf("clear: %q %v", env, err)
+	}
+	if err := uc.SetClusterEnvironment(ctx, device.ID, "test"); !errors.Is(err, errs.ErrInvalid) {
+		t.Fatalf("non-cluster: %v", err)
+	}
+	if err := uc.SetClusterEnvironment(ctx, id, "${SECRET}"); !errors.Is(err, errs.ErrInvalid) {
+		t.Fatalf("invalid env: %v", err)
+	}
+	if err := uc.UpdateNode(ctx, id, "prod", `{"environment":123}`); !errors.Is(err, errs.ErrInvalid) {
+		t.Fatalf("generic update bypass: %v", err)
+	}
+}
+
 // 不同设备即使同名也不能共享节点；重命名不应改变已有拓扑身份。
 func TestDeviceMirrorIdentity(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})

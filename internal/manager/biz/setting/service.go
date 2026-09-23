@@ -162,6 +162,11 @@ func (s *Service) SetBatch(ctx context.Context, settings []model.Setting) error 
 
 func validateSetting(category, key, value string) error {
 	switch category {
+	case model.CategoryPlatform:
+		if key == model.KeyAutoAPMEnabled && value != "true" && value != "false" {
+			return fmt.Errorf("%w: auto_apm_enabled must be true or false", errs.ErrInvalid)
+		}
+		return nil
 	case model.CategoryAgent:
 		return validateAgentSetting(key, value)
 	case model.CategoryObservability:

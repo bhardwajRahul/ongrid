@@ -53,7 +53,7 @@ export type ApmMetadata = {
   sampling: string;
   protocol: string;
   metric_format: string;
-  resource_scope?: { cluster_id: string; device_ids: string[] | null };
+  resource_scope?: { cluster_id: string; device_ids: string[] | null; k8s_cluster_id?: string };
 };
 export type ApmList = {
   metadata: ApmMetadata;
@@ -89,8 +89,10 @@ export type ApmDiagnostics = {
     instance_id: string;
     device_id: string;
     cluster_id: string;
+    k8s_cluster_id?: string;
     pod: string;
     version: string;
+    namespace?: string;
   }[];
   trace_ids: string[];
   sampled_traces: number;
@@ -217,7 +219,12 @@ export function serviceTraceQL(params: URLSearchParams, extra?: string) {
   }
   if (params.has('cluster_node_id')) {
     if (params.get('telemetry_cluster_id')) {
-      clauses.push(`resource.cluster_id = ${JSON.stringify(params.get('telemetry_cluster_id'))}`);
+      const cluster = JSON.stringify(params.get('telemetry_cluster_id'));
+      const k8s = params.get('telemetry_k8s_cluster_id');
+      // Negated existence keeps legacy spans visible with Tempo 2.10 OR filters.
+      clauses.push(k8s
+        ? `((resource.cluster_id = ${cluster} && resource.k8s_cluster_id = ${JSON.stringify(k8s)}) || (resource.cluster_id = ${JSON.stringify(k8s)} && (!(resource.k8s_cluster_id != nil) || resource.k8s_cluster_id = "")))`
+        : `resource.cluster_id = ${cluster}`);
     } else {
       const ids = (params.get('cluster_device_ids') || '').split(',').filter((id) => /^\d+$/.test(id));
       clauses.push(`resource.device_id =~ ${JSON.stringify(ids.length ? `^(${ids.join('|')})$` : 'a^')}`);

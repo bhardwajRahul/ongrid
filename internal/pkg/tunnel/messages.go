@@ -3,6 +3,8 @@ package tunnel
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/ongridio/ongrid/internal/pkg/autoapm"
 )
 
 // This file hand-mirrors api/tunnel/v1/tunnel.proto message shapes as Go
@@ -166,6 +168,12 @@ type ShellExitRequest struct {
 
 // ShellExitResponse is empty.
 type ShellExitResponse struct{}
+
+// GetPluginConfigsRequest advertises support on every fetch, including after
+// upgrades or rollbacks. It never supplies a cluster ID; Manager owns the mapping.
+type GetPluginConfigsRequest struct {
+	UnifiedClusterIdentity bool `json:"unified_cluster_identity,omitempty"`
+}
 
 // GetPluginConfigsResponse is the wire snapshot served on
 // MethodGetPluginConfigs. Mirrors biz/edge.WireSnapshot — duplicated
@@ -348,14 +356,16 @@ type HeartbeatRequest struct {
 // start (e.g. "subprocess binary missing") — that string is the whole point
 // of this field: it turns a silent failure into an operator-visible reason.
 type PluginHealthWire struct {
-	Name         string                   `json:"name"`
-	State        string                   `json:"state"`
-	LastError    string                   `json:"last_error,omitempty"`
-	RestartCount int                      `json:"restart_count,omitempty"`
-	PID          int                      `json:"pid,omitempty"`
-	StartedAt    int64                    `json:"started_at,omitempty"` // unix sec, 0 if never started
-	UpdatedAt    int64                    `json:"updated_at,omitempty"` // unix sec
-	Targets      []PluginTargetHealthWire `json:"targets,omitempty"`
+	Candidates     []autoapm.Candidate      `json:"candidates,omitempty"`
+	DiscoveryError string                   `json:"discovery_error,omitempty"`
+	Name           string                   `json:"name"`
+	State          string                   `json:"state"`
+	LastError      string                   `json:"last_error,omitempty"`
+	RestartCount   int                      `json:"restart_count,omitempty"`
+	PID            int                      `json:"pid,omitempty"`
+	StartedAt      int64                    `json:"started_at,omitempty"` // unix sec, 0 if never started
+	UpdatedAt      int64                    `json:"updated_at,omitempty"` // unix sec
+	Targets        []PluginTargetHealthWire `json:"targets,omitempty"`
 }
 
 // PluginTargetHealthWire is the source-level health carried inside a plugin

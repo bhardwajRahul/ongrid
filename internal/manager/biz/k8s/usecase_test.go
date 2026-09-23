@@ -476,7 +476,7 @@ func TestResolveTelemetryConfigPublishesIndependentExternalTraceAndLogTargets(t 
 		},
 	}})
 
-	out, err := uc.resolveTelemetryConfig(context.Background(), 7, "kt_access", "ks_secret")
+	out, err := uc.resolveTelemetryConfig(context.Background(), &model.Cluster{ID: 7}, "kt_access", "ks_secret")
 	if err != nil {
 		t.Fatalf("resolveTelemetryConfig() error = %v", err)
 	}
@@ -3070,4 +3070,21 @@ func (i *fakeIssuer) DeleteEdge(_ context.Context, edgeID uint64) error {
 	delete(i.edges, edgeID)
 	i.deleted = append(i.deleted, edgeID)
 	return nil
+}
+
+func (r *fakeRepo) UpdateAutoAPM(ctx context.Context, clusterID uint64, specJSON string) error {
+	if _, err := r.GetCluster(ctx, clusterID); err != nil {
+		return err
+	}
+	r.clusters[clusterID].AutoAPMConfigJSON = specJSON
+	return nil
+}
+func (r *fakeRepo) ListAutoAPMSpecs(context.Context) ([]string, error) {
+	var specs []string
+	for _, cluster := range r.clusters {
+		if cluster.AutoAPMConfigJSON != "" {
+			specs = append(specs, cluster.AutoAPMConfigJSON)
+		}
+	}
+	return specs, nil
 }

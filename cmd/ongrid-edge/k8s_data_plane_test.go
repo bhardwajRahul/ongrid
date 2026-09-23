@@ -17,6 +17,7 @@ func TestK8sTelemetryGatewayFetcherBuildsStandaloneConfig(t *testing.T) {
 	dir := t.TempDir()
 	files := map[string]string{
 		"telemetry-cluster-id":                "7",
+		"telemetry-cluster-node-id":           "132",
 		"telemetry-access-key":                "kt_access",
 		"telemetry-secret-key":                "ks_secret",
 		"telemetry-traces-endpoint":           "https://manager.example/v1/traces",
@@ -36,6 +37,29 @@ func TestK8sTelemetryGatewayFetcherBuildsStandaloneConfig(t *testing.T) {
 	configs, err := (&k8sTelemetryGatewayFetcher{dir: dir}).Fetch(context.Background())
 	if err != nil {
 		t.Fatalf("Fetch() error = %v", err)
+	}
+	attrs := configs[edgeplugintraces.Name].Spec["extra_attrs"].(map[string]interface{})
+	if attrs["cluster_id"] != "132" || attrs["k8s_cluster_id"] != "7" {
+		t.Fatalf("gateway mapping: %v", attrs)
+	}
+	if err := os.Remove(filepath.Join(dir, "telemetry-cluster-node-id")); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := (&k8sTelemetryGatewayFetcher{dir: dir}).Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("old controller Secret rejected: %v", err)
+	}
+	attrs = legacy[edgeplugintraces.Name].Spec["extra_attrs"].(map[string]interface{})
+	if attrs["cluster_id"] != "7" || attrs["k8s_cluster_id"] != nil {
+		t.Fatalf("legacy gateway identity: %v", attrs)
+	}
+	for _, invalid := range []string{"0", "-1", "oops"} {
+		if err := os.WriteFile(filepath.Join(dir, "telemetry-cluster-node-id"), []byte(invalid), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := (&k8sTelemetryGatewayFetcher{dir: dir}).Fetch(context.Background()); err == nil {
+			t.Fatalf("invalid mapping %q fell back to legacy", invalid)
+		}
 	}
 	cfg, ok := configs[edgeplugintraces.Name]
 	if !ok {
@@ -127,6 +151,7 @@ func TestK8sTelemetryGatewayFetcherUsesIndependentBackendAuth(t *testing.T) {
 	dir := t.TempDir()
 	files := map[string]string{
 		"telemetry-cluster-id":                "7",
+		"telemetry-cluster-node-id":           "132",
 		"telemetry-access-key":                "kt_access",
 		"telemetry-secret-key":                "ks_secret",
 		"telemetry-traces-endpoint":           "https://tempo.example/v1/traces",
@@ -167,9 +192,10 @@ func TestK8sTelemetryGatewayFetcherUsesIndependentBackendAuth(t *testing.T) {
 func TestReadTelemetryFilesRejectsMissingWriteEndpoint(t *testing.T) {
 	dir := t.TempDir()
 	for name, value := range map[string]string{
-		"telemetry-cluster-id": "7",
-		"telemetry-access-key": "kt_access",
-		"telemetry-secret-key": "ks_secret",
+		"telemetry-cluster-id":      "7",
+		"telemetry-cluster-node-id": "132",
+		"telemetry-access-key":      "kt_access",
+		"telemetry-secret-key":      "ks_secret",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0600); err != nil {
 			t.Fatalf("write %s: %v", name, err)

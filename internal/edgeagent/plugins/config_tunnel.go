@@ -44,6 +44,7 @@ type TunnelConfigFetcher struct {
 	k8sMode          string
 	k8sClusterID     uint64
 	k8sNodeName      string
+	k8sPodName       string
 	k8sNamespace     string
 	k8sTLSInsecure   bool
 	k8sGateway       bool
@@ -90,6 +91,7 @@ func NewTunnelConfigFetcherWithCredentials(client tunnel.Client, knownPlugins []
 		k8sClusterID:     envUint("ONGRID_K8S_CLUSTER_ID"),
 		k8sNodeName:      os.Getenv("ONGRID_K8S_NODE_NAME"),
 		k8sNamespace:     os.Getenv("ONGRID_K8S_POD_NAMESPACE"),
+		k8sPodName:       os.Getenv("ONGRID_K8S_POD_NAME"),
 		k8sTLSInsecure:   envBool("ONGRID_K8S_ENROLL_TLS_INSECURE"),
 		k8sGateway:       envBool("ONGRID_K8S_TELEMETRY_GATEWAY_ENABLED"),
 		managerPublicURL: os.Getenv("ONGRID_MANAGER_PUBLIC_URL"),
@@ -111,7 +113,7 @@ func (t *TunnelConfigFetcher) Fetch(ctx context.Context) (map[string]PluginConfi
 		return t.applyKubernetesDefaults(envSnap), nil
 	}
 	var resp tunnel.GetPluginConfigsResponse
-	if err := t.client.Call(ctx, tunnel.MethodGetPluginConfigs, struct{}{}, &resp); err != nil {
+	if err := t.client.Call(ctx, tunnel.MethodGetPluginConfigs, tunnel.GetPluginConfigsRequest{UnifiedClusterIdentity: true}, &resp); err != nil {
 		if cached := t.cachedSnapshot(); cached != nil {
 			return cached, nil
 		}
@@ -281,25 +283,17 @@ func (t *TunnelConfigFetcher) withKubernetesLogsDefaults(cfg PluginConfig) Plugi
 	}
 
 	spec := copySpec(cfg.Spec)
-	modeRaw, modeSet := spec["mode"]
-	mode := strings.TrimSpace(fmt.Sprint(modeRaw))
-	if modeSet && mode != "" && !strings.EqualFold(mode, "kubernetes") {
-		cfg.Spec = spec
-		return cfg
+	// Journal collection is independent of selected container paths. Missing
+	// pod_log_paths never falls back to the legacy wildcard container scan.
+	if t.k8sPodName != "" && t.k8sNamespace != "" {
+		spec["pod_log_self_exclude"] = fmt.Sprintf("/var/log/pods/%s_%s_*/*/*.log", t.k8sNamespace, t.k8sPodName)
 	}
-
 	spec["mode"] = "kubernetes"
-	if _, ok := spec["cluster_id"]; !ok && t.k8sClusterID != 0 {
-		spec["cluster_id"] = fmt.Sprintf("%d", t.k8sClusterID)
-	}
 	if _, ok := spec["node_name"]; !ok && t.k8sNodeName != "" {
 		spec["node_name"] = t.k8sNodeName
 	}
-	if _, ok := spec["pod_log_path"]; !ok {
-		spec["pod_log_path"] = "/var/log/pods/*/*/*.log"
-	}
 	if _, ok := spec["enable_journald"]; !ok {
-		spec["enable_journald"] = false
+		spec["enable_journald"] = true
 	}
 	// Node-local CRI logs already carry namespace, Pod UID/name, container,
 	// restart count, and node metadata from the container parser and the
@@ -323,7 +317,9 @@ func (t *TunnelConfigFetcher) withKubernetesTracesDefaults(cfg PluginConfig) Plu
 		extraAttrs = map[string]interface{}{}
 	}
 	if _, ok := extraAttrs["cluster_id"]; !ok && t.k8sClusterID != 0 {
-		extraAttrs["cluster_id"] = fmt.Sprintf("%d", t.k8sClusterID)
+		// Legacy Manager snapshots omit identity; preserve their internal ID
+		// without the k8s_cluster_id marker used by unified telemetry.
+		extraAttrs["cluster_id"] = fmt.Sprint(t.k8sClusterID)
 	}
 	if _, ok := extraAttrs["node_name"]; !ok && t.k8sNodeName != "" {
 		extraAttrs["node_name"] = t.k8sNodeName
@@ -376,7 +372,7 @@ func (t *TunnelConfigFetcher) withKubernetesGatewayTracesDefaults(cfg PluginConf
 		extraAttrs = map[string]interface{}{}
 	}
 	if _, ok := extraAttrs["cluster_id"]; !ok && t.k8sClusterID != 0 {
-		extraAttrs["cluster_id"] = fmt.Sprintf("%d", t.k8sClusterID)
+		extraAttrs["cluster_id"] = fmt.Sprint(t.k8sClusterID)
 	}
 	if _, ok := extraAttrs["telemetry_gateway"]; !ok {
 		extraAttrs["telemetry_gateway"] = "kubernetes"
