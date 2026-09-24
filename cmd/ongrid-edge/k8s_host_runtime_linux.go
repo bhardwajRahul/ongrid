@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,9 +22,22 @@ const (
 	procHostMountNamespace     = "/proc/1/ns/mnt"
 )
 
+// Keep the Chart's node capabilities across the non-root host identity transition.
+// OBI needs SYS_ADMIN for Go propagation, setns and restrictive perf policies;
+// JVM attach also needs SYS_CHROOT and SETUID/SETGID for target credentials.
 var k8sHostCapabilities = []int{
 	unix.CAP_DAC_READ_SEARCH,
 	unix.CAP_NET_ADMIN,
+	unix.CAP_BPF,
+	unix.CAP_PERFMON,
+	unix.CAP_SYS_PTRACE,
+	unix.CAP_CHECKPOINT_RESTORE,
+	unix.CAP_NET_RAW,
+	unix.CAP_SYS_ADMIN,
+	unix.CAP_SYS_RESOURCE,
+	unix.CAP_SYS_CHROOT,
+	unix.CAP_SETUID,
+	unix.CAP_SETGID,
 }
 
 // Give non-root OBI its own bpffs directory; never change ownership or mode of
@@ -34,11 +48,16 @@ func prepareK8sOBIFilesystem(ctx context.Context, root string, uid, gid int) err
 	}
 	base := hostPath(root, "/sys/fs/bpf")
 	var stat unix.Statfs_t
-	if err := unix.Statfs(base, &stat); err != nil {
-		return fmt.Errorf("OBI requires mounted host bpffs at /sys/fs/bpf: %w", err)
+	err := unix.Statfs(base, &stat)
+	if errors.Is(err, os.ErrNotExist) || (err == nil && stat.Type != unix.BPF_FS_MAGIC) {
+		// OBI can capture without pinned maps. Do not turn an optional APM
+		// facility into a startup requirement for metrics and logs, or create
+		// a pin directory on a filesystem that cannot hold BPF objects.
+		slog.WarnContext(ctx, "host bpffs is not mounted; skipping optional OBI map pinning directory")
+		return nil
 	}
-	if stat.Type != unix.BPF_FS_MAGIC {
-		return fmt.Errorf("OBI requires a bpf filesystem mounted at host /sys/fs/bpf")
+	if err != nil {
+		return fmt.Errorf("inspect host bpffs at /sys/fs/bpf: %w", err)
 	}
 	return ensureOwnedDirectory(filepath.Join(base, "ongrid"), uid, gid, 0750)
 }
@@ -112,7 +131,7 @@ func linuxLastCapability() int {
 }
 
 func dropToHostEdgeUser(uid, gid, lastCapability int) error {
-	capabilities := retainedK8sHostCapabilities()
+	capabilities := k8sHostCapabilities
 	for capability := 0; capability <= lastCapability; capability++ {
 		if isK8sHostCapability(capability) {
 			continue
@@ -155,23 +174,10 @@ func dropToHostEdgeUser(uid, gid, lastCapability int) error {
 }
 
 func isK8sHostCapability(capability int) bool {
-	for _, allowed := range retainedK8sHostCapabilities() {
+	for _, allowed := range k8sHostCapabilities {
 		if capability == allowed {
 			return true
 		}
 	}
 	return false
-}
-
-// Helm explicitly grants these capabilities only for opted-in nodes. SYS_ADMIN
-// is needed by official OBI for Go propagation, setns and restrictive perf policies.
-// JVM attach also needs SYS_CHROOT for mount namespaces and SETUID/SETGID
-// to match the target process credentials.
-// Preserve the granted capabilities across the non-root host identity transition.
-func retainedK8sHostCapabilities() []int {
-	out := append([]int(nil), k8sHostCapabilities...)
-	if os.Getenv("ONGRID_AUTO_APM_ALLOW_BPF") == "true" {
-		out = append(out, unix.CAP_BPF, unix.CAP_PERFMON, unix.CAP_SYS_PTRACE, unix.CAP_CHECKPOINT_RESTORE, unix.CAP_NET_RAW, unix.CAP_SYS_ADMIN, unix.CAP_SYS_RESOURCE, unix.CAP_SYS_CHROOT, unix.CAP_SETUID, unix.CAP_SETGID)
-	}
-	return out
 }
